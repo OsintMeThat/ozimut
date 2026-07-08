@@ -1,0 +1,292 @@
+"""Case workspace: create/list/open cases, scratch cases, entities and links.
+
+A case is a plain directory (spec §4):
+
+    <case>/
+    ├── case.json      # metadata + entities + links
+    ├── notes.md       # free-form case notes
+    ├── media/         # imported/downloaded media + sidecar metadata
+    ├── satellite/     # imagery crops + provenance
+    ├── proofs/        # composed proofs (PNG + editable JSON spec)
+    └── exports/       # post drafts, reports
+
+One-shot mode uses a *scratch* case under ``scratch/`` — same layout, same code
+path — which can be promoted (moved) into ``cases/`` at any time (spec §3.3).
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+
+from . import config
+
+CASE_SUBDIRS = ("media", "satellite", "proofs", "exports")
+
+EntityStatus = Literal["confirmed", "suggested"]
+
+# Extensible vocabulary (spec §5); free strings are accepted, these are the
+# well-known ones the UI knows how to render.
+ENTITY_TYPES = (
+    "person", "organization", "alias", "account", "email", "phone", "domain",
+    "ip", "vehicle", "place", "event", "media", "proof", "note",
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _slugify(name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or "case"
+
+
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+class CaseError(Exception):
+    """Raised for invalid case operations; maps to HTTP 4xx in the API layer."""
+
+
+class Case:
+    """Handle over one case directory. All reads/writes go through here."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    # -- identity ---------------------------------------------------------
+
+    @property
+    def id(self) -> str:
+        return self.path.name
+
+    @property
+    def is_scratch(self) -> bool:
+        return self.path.parent == config.scratch_dir()
+
+    # -- creation / loading ------------------------------------------------
+
+    @classmethod
+    def create(cls, name: str, *, scratch: bool = False) -> "Case":
+        parent = config.scratch_dir() if scratch else config.cases_dir()
+        parent.mkdir(parents=True, exist_ok=True)
+        slug = _new_id("scratch") if scratch else _slugify(name)
+        path = parent / slug
+        if path.exists():
+            raise CaseError(f"case '{slug}' already exists")
+        path.mkdir()
+        for sub in CASE_SUBDIRS:
+            (path / sub).mkdir()
+        case = cls(path)
+        case._write_json(
+            {
+                "ozimut": {"schema": 1},
+                "name": name,
+                "created_at": _now(),
+                "updated_at": _now(),
+                "entities": [],
+                "links": [],
+            }
+        )
+        (path / "notes.md").write_text(f"# {name}\n\n", encoding="utf-8")
+        return case
+
+    @classmethod
+    def open(cls, case_id: str) -> "Case":
+        for parent in (config.cases_dir(), config.scratch_dir()):
+            path = parent / case_id
+            if (path / "case.json").exists():
+                return cls(path)
+        raise CaseError(f"case '{case_id}' not found")
+
+    @classmethod
+    def list_all(cls) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for parent, scratch in ((config.cases_dir(), False), (config.scratch_dir(), True)):
+            if not parent.is_dir():
+                continue
+            for path in sorted(parent.iterdir()):
+                if not (path / "case.json").exists():
+                    continue
+                case = cls(path)
+                data = case.read()
+                out.append(
+                    {
+                        "id": case.id,
+                        "name": data.get("name", case.id),
+                        "scratch": scratch,
+                        "created_at": data.get("created_at"),
+                        "updated_at": data.get("updated_at"),
+                        "entity_count": len(data.get("entities", [])),
+                    }
+                )
+        out.sort(key=lambda c: c.get("updated_at") or "", reverse=True)
+        return out
+
+    # -- json io -----------------------------------------------------------
+
+    @property
+    def json_path(self) -> Path:
+        return self.path / "case.json"
+
+    def read(self) -> dict[str, Any]:
+        return json.loads(self.json_path.read_text(encoding="utf-8"))
+
+    def _write_json(self, data: dict[str, Any]) -> None:
+        data["updated_at"] = _now()
+        tmp = self.json_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        tmp.replace(self.json_path)
+
+    # -- notes -------------------------------------------------------------
+
+    @property
+    def notes_path(self) -> Path:
+        return self.path / "notes.md"
+
+    def read_notes(self) -> str:
+        try:
+            return self.notes_path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def write_notes(self, text: str) -> None:
+        self.notes_path.write_text(text, encoding="utf-8")
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def rename(self, name: str) -> None:
+        data = self.read()
+        data["name"] = name
+        self._write_json(data)
+
+    def promote(self, name: str) -> "Case":
+        """Move a scratch case into cases/ under a proper name (spec §3.3)."""
+        if not self.is_scratch:
+            raise CaseError("only scratch cases can be promoted")
+        slug = _slugify(name)
+        dest = config.cases_dir() / slug
+        if dest.exists():
+            raise CaseError(f"case '{slug}' already exists")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.path), str(dest))
+        promoted = Case(dest)
+        promoted.rename(name)
+        return promoted
+
+    def delete(self) -> None:
+        shutil.rmtree(self.path)
+
+    # -- entities & links (spec §5) -----------------------------------------
+
+    def add_entity(
+        self,
+        type_: str,
+        label: str,
+        attrs: dict[str, Any] | None = None,
+        *,
+        by: str,
+        status: EntityStatus = "confirmed",
+        source: str | None = None,
+    ) -> dict[str, Any]:
+        data = self.read()
+        entity = {
+            "id": _new_id("e"),
+            "type": type_,
+            "label": label,
+            "attrs": attrs or {},
+            "provenance": {"by": by, "at": _now(), "status": status},
+        }
+        if source:
+            entity["provenance"]["source"] = source
+        data["entities"].append(entity)
+        self._write_json(data)
+        return entity
+
+    def update_entity(self, entity_id: str, patch: dict[str, Any]) -> dict[str, Any]:
+        data = self.read()
+        for entity in data["entities"]:
+            if entity["id"] == entity_id:
+                for key in ("type", "label"):
+                    if key in patch:
+                        entity[key] = patch[key]
+                if "attrs" in patch:
+                    entity["attrs"].update(patch["attrs"])
+                if patch.get("status") in ("confirmed", "suggested"):
+                    entity["provenance"]["status"] = patch["status"]
+                self._write_json(data)
+                return entity
+        raise CaseError(f"entity '{entity_id}' not found")
+
+    def remove_entity(self, entity_id: str) -> None:
+        data = self.read()
+        before = len(data["entities"])
+        data["entities"] = [e for e in data["entities"] if e["id"] != entity_id]
+        if len(data["entities"]) == before:
+            raise CaseError(f"entity '{entity_id}' not found")
+        data["links"] = [
+            l for l in data["links"] if entity_id not in (l["from"], l["to"])
+        ]
+        self._write_json(data)
+
+    def find_entity(self, *, attr: str, value: Any) -> dict[str, Any] | None:
+        for entity in self.read()["entities"]:
+            if entity["attrs"].get(attr) == value:
+                return entity
+        return None
+
+    def add_link(
+        self,
+        from_id: str,
+        to_id: str,
+        type_: str,
+        *,
+        by: str,
+        status: EntityStatus = "confirmed",
+    ) -> dict[str, Any]:
+        data = self.read()
+        ids = {e["id"] for e in data["entities"]}
+        for eid in (from_id, to_id):
+            if eid not in ids:
+                raise CaseError(f"entity '{eid}' not found")
+        link = {
+            "id": _new_id("l"),
+            "from": from_id,
+            "to": to_id,
+            "type": type_,
+            "provenance": {"by": by, "at": _now(), "status": status},
+        }
+        data["links"].append(link)
+        self._write_json(data)
+        return link
+
+    def remove_link(self, link_id: str) -> None:
+        data = self.read()
+        before = len(data["links"])
+        data["links"] = [l for l in data["links"] if l["id"] != link_id]
+        if len(data["links"]) == before:
+            raise CaseError(f"link '{link_id}' not found")
+        self._write_json(data)
+
+    # -- helpers -------------------------------------------------------------
+
+    def subdir(self, name: str) -> Path:
+        if name not in CASE_SUBDIRS:
+            raise CaseError(f"unknown case subdir '{name}'")
+        path = self.path / name
+        path.mkdir(exist_ok=True)
+        return path
+
+    def resolve_inside(self, relative: str) -> Path:
+        """Resolve a case-relative path, refusing traversal outside the case."""
+        candidate = (self.path / relative).resolve()
+        if not candidate.is_relative_to(self.path.resolve()):
+            raise CaseError("path escapes the case directory")
+        return candidate

@@ -71,3 +71,10 @@ data/
 # Misc
 *.bak
 *.orig
+
+# Ozimut build artifacts (frontend builds into the Python package)
+src/ozimut/static/
+
+# Claude Code
+CLAUDE.md
+.claude/
