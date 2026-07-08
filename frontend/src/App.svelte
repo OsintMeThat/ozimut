@@ -18,6 +18,13 @@
 
   const ActiveTool = $derived(TOOLS.find((t) => t.id === uiState.tool)?.component ?? MediaLibrary);
 
+  // deep-linkable tools: #media #satellite #proof #post
+  const fromHash = location.hash.slice(1);
+  if (TOOLS.some((t) => t.id === fromHash)) uiState.tool = fromHash;
+  $effect(() => {
+    history.replaceState(null, '', `#${uiState.tool}`);
+  });
+
   refreshCaseList().catch(() => {});
 </script>
 

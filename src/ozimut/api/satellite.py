@@ -59,6 +59,14 @@ def parse_coordinates(body: ParseIn) -> dict[str, Any]:
     }
 
 
+@router.get("/geo/reverse")
+def reverse(lat: float, lon: float) -> dict[str, Any]:
+    result = geo.reverse_geocode(lat, lon)
+    if not result:
+        raise HTTPException(status_code=502, detail="reverse geocoding unavailable")
+    return result
+
+
 @router.post("/cases/{case_id}/satellite/capture")
 def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
     case = get_case(case_id)
