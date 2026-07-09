@@ -31,7 +31,7 @@ def test_fetch_crop_stitches_and_records_provenance():
         return Image.new("RGB", (256, 256), (10, 120, 10))
 
     img, prov = tiles.fetch_crop(
-        48.8584, 2.2945, 17, 640, 480, provider, crosshair=True, fetch_tile=fake_fetch
+        48.8584, 2.2945, 17, 640, 480, provider, fetch_tile=fake_fetch
     )
     assert img.size == (640, 480)
     assert prov["provider"] == "esri-world-imagery"
@@ -43,11 +43,42 @@ def test_fetch_crop_stitches_and_records_provenance():
     assert img.getpixel((320 - 10, 240)) == (255, 255, 255)
 
 
+def test_fetch_crop_marker_offset_moves_crosshair_and_records_pin():
+    provider = tiles.BUILTIN_PROVIDERS[0]
+
+    def fake(client, url):
+        return Image.new("RGB", (256, 256), (10, 120, 10))
+
+    img, prov = tiles.fetch_crop(
+        48.8584, 2.2945, 17, 640, 480, provider,
+        marker_x=120, marker_y=-60, marker_lat=48.86, marker_lon=2.30,
+        fetch_tile=fake,
+    )
+    # crosshair arm sits at the offset point, not the center
+    assert img.getpixel((320 + 120 - 10, 240 - 60)) == (255, 255, 255)
+    assert img.getpixel((320 - 10, 240)) == (10, 120, 10)  # center untouched
+    # recorded coords are the pin; center is remembered separately
+    assert (prov["lat"], prov["lon"]) == (48.86, 2.30)
+    assert (prov["center_lat"], prov["center_lon"]) == (48.8584, 2.2945)
+    assert prov["marker_style"] == "crosshair"
+
+
+def test_fetch_crop_none_marker_leaves_center_clean():
+    provider = tiles.BUILTIN_PROVIDERS[0]
+    img, prov = tiles.fetch_crop(
+        48.8584, 2.2945, 17, 256, 256, provider, marker_style="none",
+        fetch_tile=lambda c, u: Image.new("RGB", (256, 256), (10, 120, 10)),
+    )
+    assert img.getpixel((128, 128)) == (10, 120, 10)
+    assert prov["marker_style"] == "none"
+    assert prov["crosshair"] is False
+
+
 def test_fetch_crop_missing_tiles_dont_fail():
     provider = tiles.BUILTIN_PROVIDERS[0]
 
     img, prov = tiles.fetch_crop(
-        10.0, 10.0, 15, 512, 512, provider, crosshair=False,
+        10.0, 10.0, 15, 512, 512, provider, marker_style="none",
         fetch_tile=lambda client, url: None,
     )
     assert prov["tiles_missing"] == prov["tiles"] > 0
@@ -68,11 +99,11 @@ def test_fetch_crop_bearing_rotates_and_fills_corners():
         return fetch
 
     north, _ = tiles.fetch_crop(
-        48.8584, 2.2945, 17, 640, 480, provider, crosshair=False,
+        48.8584, 2.2945, 17, 640, 480, provider, marker_style="none",
         fetch_tile=count("north"),
     )
     img, prov = tiles.fetch_crop(
-        48.8584, 2.2945, 17, 640, 480, provider, crosshair=False, bearing=45,
+        48.8584, 2.2945, 17, 640, 480, provider, marker_style="none", bearing=45,
         fetch_tile=count("rotated"),
     )
 
@@ -94,7 +125,7 @@ def test_fetch_crop_bearing_zero_matches_unrotated():
         return Image.new("RGB", (256, 256), (10, 120, 10))
 
     img, prov = tiles.fetch_crop(
-        48.8584, 2.2945, 17, 640, 480, provider, crosshair=False, bearing=0,
+        48.8584, 2.2945, 17, 640, 480, provider, marker_style="none", bearing=0,
         fetch_tile=fetch,
     )
     assert img.size == (640, 480)

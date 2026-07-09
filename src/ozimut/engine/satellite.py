@@ -5,17 +5,19 @@ A capture is an image plus a JSON sidecar under ``<case>/satellite/``:
     satellite/sat_<stamp>_z<zoom>_<provider>.png
     satellite/sat_<stamp>_z<zoom>_<provider>.png.json   # provenance (lat/lon/…)
 
-Every capture is mirrored by exactly one ``place`` entity in ``case.json``
+Every capture is mirrored by exactly one ``capture`` entity in ``case.json``
 (spec §3.5): one capture == one entity on the right. They are tied by the
 capture's relative ``path``, stored on the entity as ``attrs.path`` — not by
 coordinates, so two captures of the same point stay two independent entities.
 The entity ``label`` is the capture title (coordinates by default, editable).
+A capture is an *image* (its marker coordinates are recorded as info); saving a
+bare ``place`` — a navigable point with no image — is a separate act.
 
 Deleting in one place must delete in the other, so all delete paths funnel here:
 
-* delete a capture   → drop the one ``place`` entity that points at it;
-* delete a ``place`` → drop the one capture file it points at (handled by the
-  entities API via :func:`unlink_capture`).
+* delete a capture        → drop the one ``capture`` entity that points at it;
+* delete a ``capture`` row → drop the one capture file it points at (handled by
+  the entities API via :func:`unlink_capture`).
 """
 
 from __future__ import annotations

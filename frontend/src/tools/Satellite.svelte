@@ -15,9 +15,13 @@
   let coordsText = $state('');
   let center = $state({ lat: 48.8584, lon: 2.2945, zoom: 16 });
   let size = $state('1000x700');
-  let crosshair = $state(true);
+  let markerStyle = $state('crosshair'); // 'crosshair' | 'pin' | 'none'
+  let moveMode = $state(false); // pin decoupled from center, draggable
+  let marker = null; // Leaflet marker instance while in move mode
+  let markerLatLng = $state(null); // {lat, lon} of the moved pin
   let bearing = $state(0);
   let capturing = $state(false);
+  let captureHover = $state(false); // previewing the crop frame (capture group hover)
   let captures = $state([]);
   let capturesFor = $state(null);
   let capturesCollapsed = $state(false);
@@ -77,6 +81,14 @@
     api.get(`/api/cases/${id}/satellite`).then((r) => (captures = r));
   });
 
+  // the case sidebar mounts/unmounts outside this component — when it does,
+  // the map container resizes, so redraw tiles for the newly exposed area
+  $effect(() => {
+    uiState.sidebarOpen; // track the global sidebar toggle
+    if (!mapReady) return;
+    tick().then(() => map?.invalidateSize());
+  });
+
   // fly to coordinates handed off from the sidebar (place entity click) —
   // match the capture's own zoom/bearing, like clicking its card
   $effect(() => {
@@ -113,10 +125,101 @@
     setBearing(0);
   }
 
+  // --- marker (crosshair / pin), optionally decoupled from center ---
+
+  // the coordinates shown & recorded: the moved pin, else the crop center
+  const displayCoords = $derived(
+    moveMode && markerLatLng ? markerLatLng : { lat: center.lat, lon: center.lon }
+  );
+
+  // crop dimensions in px — drawn as the capture-frame outline
+  const frameSize = $derived(size.split('x').map(Number));
+
+  function markerIcon(style) {
+    if (style === 'pin') {
+      return L.divIcon({
+        className: 'sat-marker',
+        iconSize: [30, 42],
+        iconAnchor: [15, 42], // tip points at the location
+        html: `<svg width="30" height="42" viewBox="0 0 30 42">
+          <path d="M15 41 C15 41 27 24 27 14 A12 12 0 1 0 3 14 C3 24 15 41 15 41 Z"
+            fill="#e5484d" stroke="#3c0c0e" stroke-width="1.5"/>
+          <circle cx="15" cy="14" r="4.5" fill="#fff" stroke="#3c0c0e" stroke-width="1"/>
+        </svg>`,
+      });
+    }
+    return L.divIcon({
+      className: 'sat-marker',
+      iconSize: [46, 46],
+      iconAnchor: [23, 23],
+      html: `<svg width="46" height="46" viewBox="0 0 46 46">
+        <g stroke="#000" stroke-width="4" opacity="0.55">
+          <line x1="1" y1="23" x2="16" y2="23"/><line x1="30" y1="23" x2="45" y2="23"/>
+          <line x1="23" y1="1" x2="23" y2="16"/><line x1="23" y1="30" x2="23" y2="45"/>
+        </g>
+        <g stroke="#fff" stroke-width="2">
+          <line x1="1" y1="23" x2="16" y2="23"/><line x1="30" y1="23" x2="45" y2="23"/>
+          <line x1="23" y1="1" x2="23" y2="16"/><line x1="23" y1="30" x2="23" y2="45"/>
+          <circle cx="23" cy="23" r="2.5" fill="none"/>
+        </g>
+      </svg>`,
+    });
+  }
+
+  function removeMarker() {
+    if (marker) marker.remove();
+    marker = null;
+    markerLatLng = null;
+  }
+
+  function toggleMoveMode() {
+    if (markerStyle === 'none') return;
+    moveMode = !moveMode;
+    if (!moveMode) {
+      removeMarker();
+      return;
+    }
+    const c = map.getCenter();
+    marker = L.marker(c, {
+      draggable: true,
+      icon: markerIcon(markerStyle),
+      zIndexOffset: 1000,
+    }).addTo(map);
+    markerLatLng = { lat: c.lat, lon: c.lng };
+    marker.on('drag move', () => {
+      const p = marker.getLatLng();
+      markerLatLng = { lat: p.lat, lon: p.lng };
+    });
+  }
+
+  // keep the live marker's look in sync with the chosen style; leaving move
+  // mode (or picking "none") drops the marker
+  $effect(() => {
+    if (markerStyle === 'none' && moveMode) {
+      moveMode = false;
+      removeMarker();
+    } else if (marker) {
+      marker.setIcon(markerIcon(markerStyle));
+    }
+  });
+
   async function captureCrop() {
     if (capturing) return;
     capturing = true;
     const [width, height] = size.split('x').map(Number);
+    // marker offset (px from crop center) + its coordinates; when the pin has
+    // been moved, its container offset already accounts for map rotation
+    let marker_x = 0, marker_y = 0;
+    let marker_lat = center.lat, marker_lon = center.lon;
+    if (moveMode && marker) {
+      const ll = marker.getLatLng();
+      marker_lat = ll.lat;
+      marker_lon = ll.lng;
+      const mapSize = map.getSize();
+      const p = map.latLngToContainerPoint(ll);
+      marker_x = Math.round(p.x - mapSize.x / 2);
+      marker_y = Math.round(p.y - mapSize.y / 2);
+    }
     try {
       const c = await ensureCase();
       const result = await api.post(`/api/cases/${c.id}/satellite/capture`, {
@@ -126,8 +229,12 @@
         width,
         height,
         provider: providerId,
-        crosshair,
         bearing,
+        marker_style: markerStyle,
+        marker_x,
+        marker_y,
+        marker_lat,
+        marker_lon,
       });
       captures = [result, ...captures];
       await reloadCase();
@@ -141,6 +248,28 @@
       toast(`Capture failed: ${e.message}`, 'danger', 6000);
     } finally {
       capturing = false;
+    }
+  }
+
+  // save just the point (pin if moved, else center) as a navigable place — no image
+  let savingPlace = $state(false);
+  async function savePlace() {
+    if (savingPlace) return;
+    savingPlace = true;
+    try {
+      const c = await ensureCase();
+      await api.post(`/api/cases/${c.id}/satellite/place`, {
+        lat: displayCoords.lat,
+        lon: displayCoords.lon,
+        zoom: center.zoom,
+        bearing,
+      });
+      await reloadCase();
+      toast('Place saved — find it in the case sidebar', 'ok');
+    } catch (e) {
+      toast(`Could not save place: ${e.message}`, 'danger', 6000);
+    } finally {
+      savingPlace = false;
     }
   }
 
@@ -200,7 +329,7 @@
   }
 
   async function copyCoords() {
-    await navigator.clipboard.writeText(`${fmt(center.lat)}, ${fmt(center.lon)}`);
+    await navigator.clipboard.writeText(`${fmt(displayCoords.lat)}, ${fmt(displayCoords.lon)}`);
     toast('Coordinates copied', 'ok', 1600);
   }
 
@@ -211,10 +340,92 @@
     map?.invalidateSize();
   }
 
-  function flyToCapture(item) {
-    if (!map || !Number.isFinite(item.lat) || !Number.isFinite(item.lon)) return;
-    map.setView([item.lat, item.lon], item.zoom);
-    setBearing(item.bearing ?? 0);
+  // saved places (navigable points) live on the case as `place` entities
+  const places = $derived(
+    (caseState.current?.entities ?? []).filter((e) => e.type === 'place')
+  );
+
+  function flyToPlace(p) {
+    const lat = Number(p.attrs?.lat);
+    const lon = Number(p.attrs?.lon);
+    if (!map || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    map.setView([lat, lon], Number(p.attrs?.zoom) || map.getZoom());
+    setBearing(Number(p.attrs?.bearing) || 0);
+  }
+
+  async function removePlace(p) {
+    await api.del(`/api/cases/${caseState.current.id}/entities/${p.id}`);
+    await reloadCase();
+  }
+
+  // collapse state for the two saved-work sections
+  let placesCollapsed = $state(false);
+  let capturesSubCollapsed = $state(false);
+
+  // --- place edit modal (title + notes), used for both save & later edits ---
+  // { id: string|null, title, notes, lat, lon, zoom, bearing }; id null = new
+  let placeModal = $state(null);
+  let placeSaving = $state(false);
+
+  function openNewPlace() {
+    placeModal = {
+      id: null,
+      title: '',
+      notes: '',
+      lat: displayCoords.lat,
+      lon: displayCoords.lon,
+      zoom: center.zoom,
+      bearing,
+    };
+  }
+
+  function openEditPlace(p) {
+    placeModal = {
+      id: p.id,
+      title: p.label ?? '',
+      notes: p.attrs?.notes ?? '',
+      lat: Number(p.attrs?.lat),
+      lon: Number(p.attrs?.lon),
+      zoom: p.attrs?.zoom,
+      bearing: p.attrs?.bearing,
+    };
+  }
+
+  function placeCoordsLabel(m) {
+    return `${m.lat.toFixed(6)}, ${m.lon.toFixed(6)}`;
+  }
+
+  async function savePlaceModal() {
+    if (!placeModal || placeSaving) return;
+    placeSaving = true;
+    try {
+      const m = placeModal;
+      if (m.id) {
+        // edit existing place: retitle + set/clear the note
+        const title = m.title.trim() || placeCoordsLabel(m);
+        await api.patch(`/api/cases/${caseState.current.id}/entities/${m.id}`, {
+          label: title,
+          attrs: { notes: m.notes.trim() },
+        });
+      } else {
+        const c = await ensureCase();
+        await api.post(`/api/cases/${c.id}/satellite/place`, {
+          lat: m.lat,
+          lon: m.lon,
+          zoom: m.zoom,
+          bearing: m.bearing,
+          title: m.title,
+          notes: m.notes,
+        });
+      }
+      placeModal = null;
+      await reloadCase();
+      toast('Place saved', 'ok', 1600);
+    } catch (e) {
+      toast(`Could not save place: ${e.message}`, 'danger', 6000);
+    } finally {
+      placeSaving = false;
+    }
   }
 </script>
 
@@ -244,25 +455,50 @@
   <div class="body">
     <div class="map-wrap">
       <div class="map" bind:this={mapEl}></div>
-      <div class="crosshair-overlay" class:hidden={!crosshair} aria-hidden="true">
-        <svg width="46" height="46" viewBox="0 0 46 46">
-          <g stroke="#000" stroke-width="4" opacity="0.55">
-            <line x1="1" y1="23" x2="16" y2="23" /><line x1="30" y1="23" x2="45" y2="23" />
-            <line x1="23" y1="1" x2="23" y2="16" /><line x1="23" y1="30" x2="23" y2="45" />
-          </g>
-          <g stroke="#fff" stroke-width="2">
-            <line x1="1" y1="23" x2="16" y2="23" /><line x1="30" y1="23" x2="45" y2="23" />
-            <line x1="23" y1="1" x2="23" y2="16" /><line x1="23" y1="30" x2="23" y2="45" />
-            <circle cx="23" cy="23" r="2.5" fill="none" />
-          </g>
-        </svg>
-      </div>
+
+      <!-- capture-frame outline: what the crop will cover — only while a capture
+           is the intent (hovering the capture group, or mid-capture) -->
+      {#if captureHover || capturing}
+        <div
+          class="frame-overlay"
+          style="width:{frameSize[0]}px;height:{frameSize[1]}px"
+          aria-hidden="true"
+        ></div>
+      {/if}
+
+      <!-- fixed center marker; a draggable Leaflet marker takes over in move mode -->
+      {#if markerStyle !== 'none' && !moveMode}
+        <div class="marker-overlay marker-{markerStyle}" aria-hidden="true">
+          {#if markerStyle === 'pin'}
+            <svg width="30" height="42" viewBox="0 0 30 42">
+              <path
+                d="M15 41 C15 41 27 24 27 14 A12 12 0 1 0 3 14 C3 24 15 41 15 41 Z"
+                fill="#e5484d" stroke="#3c0c0e" stroke-width="1.5"
+              />
+              <circle cx="15" cy="14" r="4.5" fill="#fff" stroke="#3c0c0e" stroke-width="1" />
+            </svg>
+          {:else}
+            <svg width="46" height="46" viewBox="0 0 46 46">
+              <g stroke="#000" stroke-width="4" opacity="0.55">
+                <line x1="1" y1="23" x2="16" y2="23" /><line x1="30" y1="23" x2="45" y2="23" />
+                <line x1="23" y1="1" x2="23" y2="16" /><line x1="23" y1="30" x2="23" y2="45" />
+              </g>
+              <g stroke="#fff" stroke-width="2">
+                <line x1="1" y1="23" x2="16" y2="23" /><line x1="30" y1="23" x2="45" y2="23" />
+                <line x1="23" y1="1" x2="23" y2="16" /><line x1="23" y1="30" x2="23" y2="45" />
+                <circle cx="23" cy="23" r="2.5" fill="none" />
+              </g>
+            </svg>
+          {/if}
+        </div>
+      {/if}
 
       <div class="hud card">
         <button class="hud-coords mono" onclick={copyCoords} title="Copy coordinates">
           <Icon name="crosshair" size={13} />
-          {fmt(center.lat)}, {fmt(center.lon)}
+          {fmt(displayCoords.lat)}, {fmt(displayCoords.lon)}
           <span class="z">z{center.zoom}</span>
+          {#if moveMode && markerLatLng}<span class="pin-tag">pin</span>{/if}
           <Icon name="copy" size={12} />
         </button>
       </div>
@@ -310,22 +546,63 @@
             </option>
           {/each}
         </select>
-        <select class="select" bind:value={size} title="Crop size">
-          <option value="800x600">800 × 600</option>
-          <option value="1000x700">1000 × 700</option>
-          <option value="1280x800">1280 × 800</option>
-          <option value="1000x1000">1000 × 1000</option>
+        <select class="select" bind:value={markerStyle} title="Marker style">
+          <option value="crosshair">✛ crosshair</option>
+          <option value="pin">📍 pin</option>
+          <option value="none">no marker</option>
         </select>
-        <label class="check">
-          <input type="checkbox" bind:checked={crosshair} /> crosshair
-        </label>
-        <button class="btn btn-primary" onclick={captureCrop} disabled={capturing}>
-          {#if capturing}
-            <span class="spinner"></span> Capturing…
-          {:else}
-            <Icon name="satellite" size={15} /> Capture
-          {/if}
+        <button
+          class="btn btn-toggle"
+          class:on={moveMode}
+          onclick={toggleMoveMode}
+          disabled={markerStyle === 'none'}
+          title="Move the marker off-center — recorded coordinates follow the pin"
+        >
+          <Icon name="crosshair" size={14} /> {moveMode ? 'Moving' : 'Move pin'}
         </button>
+        <span class="bar-sep" aria-hidden="true"></span>
+        <div class="place-save">
+          <button
+            class="btn place-save-main"
+            onclick={savePlace}
+            disabled={savingPlace}
+            title="Save just this point (the pin, or the crop center) as a navigable place — no image"
+          >
+            <Icon name="pin" size={15} /> {savingPlace ? 'Saving…' : 'Save place'}
+          </button>
+          <button
+            class="btn place-save-edit"
+            onclick={openNewPlace}
+            title="Save place with a title and note…"
+            aria-label="Save place with a title and note"
+          >
+            <Icon name="note" size={14} />
+          </button>
+        </div>
+        <!-- crop size only concerns a capture, so it lives with the Capture button;
+             hovering this group previews the crop frame on the map -->
+        <div
+          class="capture-group"
+          onmouseenter={() => (captureHover = true)}
+          onmouseleave={() => (captureHover = false)}
+          onfocusin={() => (captureHover = true)}
+          onfocusout={() => (captureHover = false)}
+          role="group"
+        >
+          <select class="select" bind:value={size} title="Crop size">
+            <option value="800x600">800 × 600</option>
+            <option value="1000x700">1000 × 700</option>
+            <option value="1280x800">1280 × 800</option>
+            <option value="1000x1000">1000 × 1000</option>
+          </select>
+          <button class="btn btn-primary" onclick={captureCrop} disabled={capturing}>
+            {#if capturing}
+              <span class="spinner"></span> Capturing…
+            {:else}
+              <Icon name="satellite" size={15} /> Capture
+            {/if}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -337,74 +614,149 @@
         title={capturesCollapsed ? 'Show captures' : 'Hide captures'}
       >
         <Icon name={capturesCollapsed ? 'chevronLeft' : 'chevronRight'} size={15} />
-        <span class="label" style="margin:0">Captures</span>
-        <span class="count">{captures.length}</span>
+        <span class="label" style="margin:0">Saved</span>
+        <span class="count">{places.length + captures.length}</span>
       </button>
       {#if capturesCollapsed}
         <!-- collapsed: header acts as the toggle back to the list -->
-      {:else if !captures.length}
-        <div class="none">
-          Captured crops land in the case with full provenance: provider, zoom, date,
-          attribution.
-        </div>
       {:else}
-        <div class="cap-list">
-          {#each captures as item (item.path)}
-            <div class="cap card fade-up">
-              <button
-                type="button"
-                class="cap-goto"
-                title="Show on map (same zoom)"
-                onclick={() => flyToCapture(item)}
-              >
-                <img
-                  src={`/files/${caseState.current.id}/${item.path}`}
-                  alt={item.filename}
-                  loading="lazy"
-                />
-                <div class="cap-meta">
-                  <span class="title">{item.title ?? coordsLabel(item)}</span>
-                  <span class="mono coords">{coordsLabel(item)}</span>
-                  <span class="prov">z{item.zoom}{item.bearing ? ` · ${Math.round(item.bearing)}°` : ''} · {item.provider_label} · {item.fetched_at?.slice(0, 10)}</span>
-                </div>
-              </button>
-              <div class="cap-actions">
-                <button
-                  class="btn btn-ghost btn-sm"
-                  title="Notes"
-                  onclick={() => openNotes(item)}
-                >
-                  <Icon name="note" size={14} />
-                </button>
-                <button
-                  class="btn btn-ghost btn-sm"
-                  title="Send to Proof Composer"
-                  onclick={() => sendToComposer(item)}
-                >
-                  <Icon name="proof" size={14} />
-                </button>
-                <a
-                  class="btn btn-ghost btn-sm"
-                  href={`/files/${caseState.current.id}/${item.path}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  title="Open"
-                >
-                  <Icon name="external" size={14} />
-                </a>
-                <button
-                  class="btn btn-ghost btn-sm"
-                  title="Delete"
-                  onclick={() => removeCapture(item)}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
+        <div class="panel-scroll">
+          <!-- Places: navigable points (no image) -->
+          <button
+            type="button"
+            class="sub-head"
+            onclick={() => (placesCollapsed = !placesCollapsed)}
+          >
+            <Icon name={placesCollapsed ? 'chevronRight' : 'chevronDown'} size={12} />
+            <Icon name="pin" size={13} />
+            <span>Places</span>
+            <span class="count">{places.length}</span>
+          </button>
+          {#if !placesCollapsed}
+            {#if !places.length}
+              <div class="none">Use “Save place” to drop a point you can fly back to.</div>
+            {:else}
+              <div class="place-list">
+                {#each places as p (p.id)}
+                  <div class="place-row card fade-up">
+                    <div class="place-main">
+                      <button
+                        type="button"
+                        class="place-goto"
+                        title="Fly the map to this point"
+                        onclick={() => flyToPlace(p)}
+                      >
+                        <Icon name="pin" size={15} />
+                        <div class="place-meta">
+                          <span class="title">{p.label}</span>
+                          <span class="prov">
+                            z{p.attrs?.zoom}{p.attrs?.bearing ? ` · ${Math.round(p.attrs.bearing)}°` : ''}
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        class="btn btn-ghost btn-sm"
+                        title="Edit title & note"
+                        onclick={() => openEditPlace(p)}
+                      >
+                        <Icon name="note" size={14} />
+                      </button>
+                      <button
+                        class="btn btn-ghost btn-sm"
+                        title="Delete place"
+                        onclick={() => removePlace(p)}
+                      >
+                        <Icon name="trash" size={14} />
+                      </button>
+                    </div>
+                    {#if p.attrs?.notes}
+                      <div class="place-notes">{p.attrs.notes}</div>
+                    {/if}
+                  </div>
+                {/each}
               </div>
-              {#if item.notes}
-                <div class="cap-notes">{item.notes}</div>
-              {/if}
-            </div>
-          {/each}
+            {/if}
+          {/if}
+
+          <!-- Captures: sourced imagery crops (images) -->
+          <button
+            type="button"
+            class="sub-head"
+            onclick={() => (capturesSubCollapsed = !capturesSubCollapsed)}
+          >
+            <Icon name={capturesSubCollapsed ? 'chevronRight' : 'chevronDown'} size={12} />
+            <Icon name="satellite" size={13} />
+            <span>Captures</span>
+            <span class="count">{captures.length}</span>
+          </button>
+          {#if !capturesSubCollapsed}
+            {#if !captures.length}
+              <div class="none">
+                Captured crops land in the case with full provenance: provider, zoom, date,
+                attribution.
+              </div>
+            {:else}
+              <div class="cap-list">
+              {#each captures as item (item.path)}
+                <div class="cap card fade-up">
+                  <a
+                    class="cap-goto"
+                    href={`/files/${caseState.current.id}/${item.path}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="Open the full image"
+                  >
+                    <img
+                      src={`/files/${caseState.current.id}/${item.path}`}
+                      alt={item.filename}
+                      loading="lazy"
+                    />
+                    <div class="cap-meta">
+                      <span class="title">{item.title ?? coordsLabel(item)}</span>
+                      <span class="mono coords">{coordsLabel(item)}</span>
+                      <span class="prov">z{item.zoom}{item.bearing ? ` · ${Math.round(item.bearing)}°` : ''} · {item.provider_label} · {item.fetched_at?.slice(0, 10)}</span>
+                    </div>
+                  </a>
+                  <div class="cap-actions">
+                    <button
+                      class="btn btn-ghost btn-sm"
+                      title="Edit title & note"
+                      onclick={() => openNotes(item)}
+                    >
+                      <Icon name="note" size={14} />
+                    </button>
+                    <button
+                      class="btn btn-ghost btn-sm"
+                      title="Send to Proof Composer"
+                      onclick={() => sendToComposer(item)}
+                    >
+                      <Icon name="proof" size={14} />
+                    </button>
+                    <a
+                      class="btn btn-ghost btn-sm"
+                      href={`/files/${caseState.current.id}/${item.path}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open"
+                    >
+                      <Icon name="external" size={14} />
+                    </a>
+                    <button
+                      class="btn btn-ghost btn-sm"
+                      title="Delete"
+                      onclick={() => removeCapture(item)}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </div>
+                  {#if item.notes}
+                    <div class="cap-notes">{item.notes}</div>
+                  {/if}
+                </div>
+              {/each}
+              </div>
+            {/if}
+          {/if}
         </div>
       {/if}
     </aside>
@@ -456,6 +808,47 @@
   </Modal>
 {/if}
 
+<!-- place edit / save-with-details modal -->
+{#if placeModal}
+  <Modal
+    title={placeModal.id ? 'Edit place' : 'Save place'}
+    onclose={() => (placeModal = null)}
+    width="420px"
+  >
+    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
+    <input
+      class="input"
+      placeholder={placeCoordsLabel(placeModal)}
+      bind:value={placeModal.title}
+    />
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0" />
+    <div class="sat-info-rows">
+      <div class="sat-info-row">
+        <span class="sat-info-label">Coordinates</span>
+        <span class="mono">{placeCoordsLabel(placeModal)}</span>
+      </div>
+      <div class="sat-info-row">
+        <span class="sat-info-label">Zoom</span>
+        <span>z{placeModal.zoom}{placeModal.bearing ? ` · ${Math.round(placeModal.bearing)}°` : ''}</span>
+      </div>
+    </div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0" />
+    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Notes</label>
+    <textarea
+      class="textarea"
+      rows="5"
+      placeholder="Add observations, links, context…"
+      bind:value={placeModal.notes}
+    ></textarea>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
+      <button class="btn" onclick={() => (placeModal = null)}>Cancel</button>
+      <button class="btn btn-primary" onclick={savePlaceModal} disabled={placeSaving}>
+        {placeSaving ? 'Saving…' : 'Save'}
+      </button>
+    </div>
+  </Modal>
+{/if}
+
 <style>
   .spacer {
     flex: 1;
@@ -474,23 +867,50 @@
     position: relative;
     flex: 1;
     min-width: 0;
+    overflow: hidden;
   }
   .map {
     position: absolute;
     inset: 0;
     background: var(--bg-2);
   }
-  .crosshair-overlay {
+  .frame-overlay {
     position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    border: 1px dashed rgba(255, 255, 255, 0.55);
+    box-shadow: 0 0 0 100vmax rgba(8, 11, 18, 0.28);
+    pointer-events: none;
+    z-index: 450;
+  }
+  .marker-overlay {
+    position: absolute;
+    top: 50%;
+    left: 50%;
     pointer-events: none;
     z-index: 500;
   }
-  .crosshair-overlay.hidden {
-    display: none;
+  .marker-crosshair {
+    transform: translate(-50%, -50%);
+  }
+  .marker-pin {
+    /* tip of the pin sits on the point */
+    transform: translate(-50%, -100%);
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+  }
+  :global(.sat-marker) {
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+  }
+  .pin-tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent-text, #fff);
+    background: var(--accent);
+    border-radius: 3px;
+    padding: 1px 4px;
   }
   .hud {
     position: absolute;
@@ -603,17 +1023,39 @@
   .capture-bar .select {
     width: auto;
   }
-  .check {
+  .bar-sep {
+    width: 1px;
+    align-self: stretch;
+    background: var(--border);
+    margin: 0 2px;
+  }
+  .capture-group {
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: var(--fs-sm);
-    color: var(--text-2);
-    user-select: none;
+    gap: 10px;
+  }
+  .place-save {
+    display: flex;
+    align-items: stretch;
+  }
+  .place-save-main {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .place-save-edit {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: none;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .btn-toggle {
     white-space: nowrap;
   }
-  .check input {
-    accent-color: var(--accent);
+  .btn-toggle.on {
+    background: var(--accent);
+    color: var(--accent-text);
+    border-color: var(--accent);
   }
   .spinner {
     width: 13px;
@@ -677,10 +1119,85 @@
     font-size: var(--fs-xs);
     color: var(--text-3);
   }
-  .cap-list {
+  .panel-scroll {
     flex: 1;
     overflow-y: auto;
-    padding: 6px 12px 12px;
+    padding: 4px 12px 12px;
+    display: flex;
+    flex-direction: column;
+  }
+  .sub-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 12px 2px 6px;
+    background: none;
+    border: none;
+    font: inherit;
+    font-size: var(--fs-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-2);
+    text-align: left;
+    cursor: pointer;
+  }
+  .sub-head:hover {
+    color: var(--accent);
+  }
+  .sub-head .count {
+    margin-left: auto;
+    text-transform: none;
+  }
+  .place-notes {
+    padding: 0 10px 8px 30px;
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    font-style: italic;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  .place-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .place-row {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .place-main {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 6px 4px 4px;
+  }
+  .place-goto {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 1;
+    min-width: 0;
+    padding: 5px 6px;
+    background: none;
+    border: none;
+    color: var(--text-2);
+    text-align: left;
+    cursor: pointer;
+  }
+  .place-goto:hover,
+  .place-goto:hover .title {
+    color: var(--accent);
+  }
+  .place-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .cap-list {
     display: flex;
     flex-direction: column;
     gap: 10px;

@@ -16,14 +16,28 @@ router = APIRouter(prefix="/api", tags=["satellite"])
 
 
 class CaptureIn(BaseModel):
-    lat: float = Field(ge=-90, le=90)
+    lat: float = Field(ge=-90, le=90)  # crop frame center
     lon: float = Field(ge=-180, le=180)
     zoom: int = Field(ge=1, le=22)
     width: int = Field(default=1000, ge=256, le=2048)
     height: int = Field(default=700, ge=256, le=2048)
     provider: str = "esri-world-imagery"
-    crosshair: bool = True
     bearing: float = Field(default=0.0, ge=0, le=360)
+    # marker (recorded point of interest): style + optional offset from center
+    marker_style: str = Field(default="crosshair", pattern="^(crosshair|pin|none)$")
+    marker_x: int = Field(default=0, ge=-2048, le=2048)
+    marker_y: int = Field(default=0, ge=-2048, le=2048)
+    marker_lat: float | None = Field(default=None, ge=-90, le=90)
+    marker_lon: float | None = Field(default=None, ge=-180, le=180)
+
+
+class PlaceIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    zoom: int = Field(default=16, ge=1, le=22)
+    bearing: float = Field(default=0.0, ge=0, le=360)
+    title: str | None = None
+    notes: str | None = None
 
 
 class ParseIn(BaseModel):
@@ -85,7 +99,9 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
     try:
         image, provenance = tiles.fetch_crop(
             body.lat, body.lon, body.zoom, body.width, body.height,
-            provider, crosshair=body.crosshair, bearing=body.bearing,
+            provider, bearing=body.bearing, marker_style=body.marker_style,
+            marker_x=body.marker_x, marker_y=body.marker_y,
+            marker_lat=body.marker_lat, marker_lon=body.marker_lon,
         )
     except tiles.TileFetchError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -97,21 +113,24 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
     rel_path = f"satellite/{name}"
     sat_dir = case.subdir("satellite")
     image.save(sat_dir / name, "PNG")
-    label = satellite_engine.coords_label(body.lat, body.lon)
+    # the recorded point is the marker (== center unless it was moved off-center)
+    marker_lat, marker_lon = provenance["lat"], provenance["lon"]
+    label = satellite_engine.coords_label(marker_lat, marker_lon)
     provenance["filename"] = name
     provenance["title"] = label
-    provenance["plus_code"] = geo.plus_code(body.lat, body.lon)
-    provenance["dms"] = geo.to_dms(body.lat, body.lon)
+    provenance["plus_code"] = geo.plus_code(marker_lat, marker_lon)
+    provenance["dms"] = geo.to_dms(marker_lat, marker_lon)
     (sat_dir / f"{name}.json").write_text(
         json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    # one capture == one place entity, tied by its path (spec §3.5); capturing is
-    # a deliberate act, so it's filed straight away — retitle/refile/delete later
+    # a capture is an image artifact, mirrored by one ``capture`` entity tied by
+    # its path (spec §3.5) — it carries the marker's coordinates as info but is
+    # not a navigable point; saving a ``place`` (below) is the separate act for that
     case.add_entity(
-        "place",
+        "capture",
         label,
-        attrs={"coords": label, "lat": body.lat, "lon": body.lon,
+        attrs={"coords": label, "lat": marker_lat, "lon": marker_lon,
                "plus_code": provenance["plus_code"], "path": rel_path,
                "zoom": provenance["zoom"], "bearing": body.bearing},
         by="satellite",
@@ -119,6 +138,21 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
     )
 
     return {"path": rel_path, **provenance}
+
+
+@router.post("/cases/{case_id}/satellite/place")
+def save_place(case_id: str, body: PlaceIn) -> dict[str, Any]:
+    """Save just a point (the pin, or the crop center) as a navigable ``place`` —
+    no image. Clicking it in the sidebar flies the map back to it."""
+    case = get_case(case_id)
+    coords = satellite_engine.coords_label(body.lat, body.lon)
+    label = (body.title or "").strip() or coords
+    attrs = {"coords": coords, "lat": body.lat, "lon": body.lon,
+             "plus_code": geo.plus_code(body.lat, body.lon),
+             "zoom": body.zoom, "bearing": body.bearing}
+    if body.notes and body.notes.strip():
+        attrs["notes"] = body.notes.strip()
+    return case.add_entity("place", label, attrs=attrs, by="satellite", status="confirmed")
 
 
 @router.get("/cases/{case_id}/satellite")

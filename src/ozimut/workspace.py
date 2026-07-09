@@ -34,7 +34,7 @@ EntityStatus = Literal["confirmed", "suggested"]
 # well-known ones the UI knows how to render.
 ENTITY_TYPES = (
     "person", "organization", "alias", "account", "email", "phone", "domain",
-    "ip", "vehicle", "place", "event", "media", "proof", "note",
+    "ip", "vehicle", "place", "capture", "event", "media", "proof", "note",
 )
 
 

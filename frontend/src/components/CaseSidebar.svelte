@@ -13,6 +13,7 @@
     email: 'note',
     phone: 'hash',
     place: 'pin',
+    capture: 'satellite',
     event: 'clock',
     media: 'image',
     proof: 'proof',
@@ -30,7 +31,7 @@
   };
 
   // Entity types backed by a file on disk — deleting them everywhere drops the file.
-  const FILE_BACKED = new Set(['media', 'place', 'proof', 'post', 'inspect-session']);
+  const FILE_BACKED = new Set(['media', 'capture', 'proof', 'post', 'inspect-session']);
 
   // ── case notes (single notes.md) ─────────────────────────────────────────
   let caseNotes = $state('');
@@ -84,6 +85,14 @@
     await api.del(`/api/cases/${caseState.current.id}/entities/${entity.id}`);
     await reloadCase();
     toast(`Dismissed "${entity.label}"`, 'info');
+  }
+
+  // clicking a row: notes open the editor, captures open their image, places
+  // navigate the map — everything else opens its tool
+  function onEntityActivate(entity) {
+    if (entity.type === 'note') return openEditNote(entity);
+    if (entity.type === 'capture') return openInfo(entity);
+    openEntity(entity);
   }
 
   function openEntity(entity) {
@@ -155,15 +164,15 @@
     })).filter((g) => g.items.length > 0);
   });
 
-  let groupOpen = $state({}); // group key -> bool (absent = open)
-  const isGroupOpen = (k) => groupOpen[k] !== false;
+  let groupOpen = $state({}); // group key -> bool (absent = collapsed)
+  const isGroupOpen = (k) => groupOpen[k] === true;
   const toggleGroup = (k) => (groupOpen[k] = !isGroupOpen(k));
 
   // ── My work: the analyst's own nested folder tree ('/'-separated paths) ────
   let newFolder = $state(''); // top-level create input
   let addingUnder = $state(undefined); // folder path currently gaining a child
   let newSubName = $state('');
-  let expanded = $state({}); // path -> bool (absent = expanded)
+  let expanded = $state({}); // path -> bool (absent = collapsed)
   let dragEntityId = $state(null);
   let dragOverFolder = $state(undefined); // folder path being hovered
 
@@ -207,7 +216,7 @@
     return node.entities.length + node.children.reduce((s, c) => s + subtreeCount(c), 0);
   }
 
-  const isExpanded = (path) => expanded[path] !== false;
+  const isExpanded = (path) => expanded[path] === true;
   function toggle(path) { expanded[path] = !isExpanded(path); }
   function focus(node) { node.focus(); }
 
@@ -348,24 +357,76 @@
     };
   }
 
-  // ── entity info modal (media details) ─────────────────────────────────────
+  // ── entity info / edit modal ──────────────────────────────────────────────
   let infoEntity = $state(null);
-  let infoData = $state(null); // resolved media listing item (or null)
+  let infoData = $state(null); // resolved media/satellite listing item (or null)
   let infoLoading = $state(false);
+  // editable fields (title + notes), like the dedicated tool's editor
+  let infoTitle = $state('');
+  let infoNotes = $state('');
+  let infoSaving = $state(false);
+  // which types can be edited straight from the sidebar
+  const EDITABLE = new Set(['capture', 'place', 'media']);
 
   async function openInfo(entity) {
     infoEntity = entity;
     infoData = null;
-    if (entity.type === 'media' && entity.attrs?.path) {
+    infoTitle = entity.label ?? '';
+    infoNotes = entity.attrs?.notes ?? '';
+    const endpoint =
+      entity.type === 'media' ? 'media' : entity.type === 'capture' ? 'satellite' : null;
+    if (endpoint && entity.attrs?.path) {
       infoLoading = true;
       try {
-        const list = await api.get(`/api/cases/${caseState.current.id}/media`);
+        const list = await api.get(`/api/cases/${caseState.current.id}/${endpoint}`);
         infoData = list.find((m) => m.path === entity.attrs.path) ?? null;
+        if (infoData) {
+          infoTitle = infoData.title ?? entity.label ?? '';
+          infoNotes = infoData.notes ?? infoNotes;
+        }
       } catch {
         infoData = null;
       } finally {
         infoLoading = false;
       }
+    }
+  }
+
+  async function saveInfo() {
+    if (!infoEntity || infoSaving) return;
+    infoSaving = true;
+    const cid = caseState.current.id;
+    try {
+      if (infoEntity.type === 'capture') {
+        // the satellite PATCH keeps the sidecar (title/notes) and the mirrored
+        // entity label in sync — the same path the Satellite tool uses
+        await api.patch(`/api/cases/${cid}/satellite`, {
+          path: infoEntity.attrs.path,
+          title: infoTitle,
+          notes: infoNotes,
+        });
+      } else if (infoEntity.type === 'media') {
+        // the media PATCH writes the sidecar (title/notes) and mirrors the
+        // title onto the entity label, so the Media tab reflects it too
+        await api.patch(`/api/cases/${cid}/media`, {
+          path: infoEntity.attrs.path,
+          title: infoTitle.trim(),
+          notes: infoNotes,
+        });
+      } else {
+        // place (or any bare entity): retitle + note on the entity itself
+        await api.patch(`/api/cases/${cid}/entities/${infoEntity.id}`, {
+          label: infoTitle.trim() || infoEntity.label,
+          attrs: { notes: infoNotes.trim() },
+        });
+      }
+      infoEntity = null;
+      await reloadCase();
+      toast('Saved', 'ok', 1600);
+    } catch (e) {
+      toast(e.message, 'danger');
+    } finally {
+      infoSaving = false;
     }
   }
 
@@ -616,7 +677,7 @@
 
 <!-- one entity row. zone 'saved' → delete everywhere; 'mywork' → unfile only -->
 {#snippet entityRow(e, depth, zone)}
-  {@const isClickable = e.type === 'note' || !!ENTITY_TOOL[e.type]}
+  {@const isClickable = e.type === 'note' || e.type === 'capture' || !!ENTITY_TOOL[e.type]}
   <div
     class="entity"
     class:clickable={isClickable}
@@ -625,10 +686,10 @@
     draggable="true"
     ondragstart={(ev) => onDragStart(ev, e)}
     ondragend={() => { dragEntityId = null; dragOverFolder = undefined; }}
-    onclick={() => (e.type === 'note' ? openEditNote(e) : openEntity(e))}
+    onclick={() => onEntityActivate(e)}
     role={isClickable ? 'button' : undefined}
     tabindex={isClickable ? 0 : undefined}
-    onkeydown={(ev) => ev.key === 'Enter' && (e.type === 'note' ? openEditNote(e) : openEntity(e))}
+    onkeydown={(ev) => ev.key === 'Enter' && onEntityActivate(e)}
   >
     <Icon name="grip" size={13} />
     <Icon name={ENTITY_ICONS[e.type] ?? 'note'} size={14} />
@@ -734,6 +795,20 @@
         <!-- svelte-ignore a11y_media_has_caption -->
         <video src={`/files/${caseState.current.id}/${infoData.path}`} controls preload="metadata"></video>
       </div>
+    {:else if infoEntity.type === 'capture' && infoEntity.attrs?.path}
+      <div class="info-preview">
+        <img src={`/files/${caseState.current.id}/${infoEntity.attrs.path}`} alt={infoEntity.label} />
+      </div>
+    {/if}
+
+    {#if EDITABLE.has(infoEntity.type)}
+      <label class="modal-label" for="info-title">Title</label>
+      <input
+        id="info-title"
+        class="input"
+        bind:value={infoTitle}
+        placeholder={infoEntity.attrs?.coords ?? 'Title'}
+      />
     {/if}
 
     <div class="info-rows">
@@ -741,7 +816,7 @@
       {#if folderOf(infoEntity)}
         <div class="info-row"><span class="info-k">Folder</span><span>{folderOf(infoEntity)}</span></div>
       {/if}
-      {#if infoData}
+      {#if infoEntity.type === 'media' && infoData}
         <div class="info-row"><span class="info-k">Kind</span><span>{infoData.kind}</span></div>
         <div class="info-row"><span class="info-k">Size</span><span>{fmtSize(infoData.size)}</span></div>
         {#if infoData.added_at}
@@ -770,8 +845,15 @@
             </a>
           </div>
         {/if}
-        {#if infoData.notes}
-          <div class="info-row"><span class="info-k">Notes</span><span>{infoData.notes}</span></div>
+      {:else if infoEntity.type === 'capture'}
+        {#if infoData?.provider_label}
+          <div class="info-row"><span class="info-k">Provider</span><span>{infoData.provider_label}</span></div>
+        {/if}
+        {#if infoEntity.attrs?.zoom != null}
+          <div class="info-row"><span class="info-k">Zoom</span><span>z{infoEntity.attrs.zoom}</span></div>
+        {/if}
+        {#if infoData?.fetched_at}
+          <div class="info-row"><span class="info-k">Date</span><span class="mono">{infoData.fetched_at.slice(0, 10)}</span></div>
         {/if}
       {:else if infoEntity.attrs?.content}
         <div class="info-note-body">{infoEntity.attrs.content}</div>
@@ -781,9 +863,21 @@
       {/if}
     </div>
 
+    {#if EDITABLE.has(infoEntity.type)}
+      <label class="modal-label" for="info-notes" style="margin-top:10px">Notes</label>
+      <textarea
+        id="info-notes"
+        class="textarea"
+        rows="4"
+        bind:value={infoNotes}
+        placeholder="Add observations, links, context…"
+      ></textarea>
+    {/if}
+
+    {@const filePath = infoData?.path ?? (infoEntity.type === 'capture' ? infoEntity.attrs?.path : null)}
     <div class="modal-row">
-      {#if infoData?.path}
-        <a class="btn btn-ghost btn-sm" href={`/files/${caseState.current.id}/${infoData.path}`} target="_blank" rel="noreferrer">
+      {#if filePath}
+        <a class="btn btn-ghost btn-sm" href={`/files/${caseState.current.id}/${filePath}`} target="_blank" rel="noreferrer">
           <Icon name="external" size={13} /> Open file
         </a>
       {/if}
@@ -794,6 +888,11 @@
       {/if}
       <div style="flex:1"></div>
       <button class="btn" onclick={() => (infoEntity = null)}>Close</button>
+      {#if EDITABLE.has(infoEntity.type)}
+        <button class="btn btn-primary" onclick={saveInfo} disabled={infoSaving}>
+          {infoSaving ? 'Saving…' : 'Save'}
+        </button>
+      {/if}
     </div>
   </Modal>
 {/if}
