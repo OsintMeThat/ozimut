@@ -26,7 +26,7 @@ from typing import Any, Literal
 
 from . import config
 
-CASE_SUBDIRS = ("media", "satellite", "proofs", "exports")
+CASE_SUBDIRS = ("media", "satellite", "proofs", "exports", "inspect")
 
 EntityStatus = Literal["confirmed", "suggested"]
 
@@ -276,19 +276,37 @@ class Case:
             raise CaseError(f"link '{link_id}' not found")
         self._write_json(data)
 
-    # -- folders (organisational buckets for entities) -----------------------
+    # -- folders (nested organisational buckets for entities) ----------------
+    #
+    # Folders form a tree encoded as ``/``-separated paths, e.g.
+    # ``Sources/Telegram``. An entity's ``attrs.folder`` holds the full path of
+    # the node it is filed under. The stored list always contains every
+    # ancestor of every leaf, so the tree is well-formed on its own.
+
+    @staticmethod
+    def _normalize_folder(name: str) -> str:
+        parts = [p.strip() for p in str(name).split("/")]
+        parts = [p for p in parts if p]
+        if not parts:
+            raise CaseError("folder name is required")
+        return "/".join(parts)
 
     def list_folders(self) -> list[str]:
         return self.read().get("folders", [])
 
     def add_folder(self, name: str) -> list[str]:
-        name = name.strip()
-        if not name:
-            raise CaseError("folder name is required")
+        path = self._normalize_folder(name)
         data = self.read()
         folders = data.setdefault("folders", [])
-        if name not in folders:
-            folders.append(name)
+        # materialise the leaf and every ancestor so the tree stays connected
+        segments = path.split("/")
+        changed = False
+        for i in range(1, len(segments) + 1):
+            ancestor = "/".join(segments[:i])
+            if ancestor not in folders:
+                folders.append(ancestor)
+                changed = True
+        if changed:
             folders.sort(key=str.lower)
             self._write_json(data)
         return data["folders"]
@@ -296,11 +314,14 @@ class Case:
     def remove_folder(self, name: str) -> list[str]:
         data = self.read()
         folders = data.setdefault("folders", [])
-        if name in folders:
-            folders.remove(name)
-        # unassign any entity still pointing at the removed folder
+        # a folder and its whole subtree go together
+        prefix = name + "/"
+        doomed = {f for f in folders if f == name or f.startswith(prefix)}
+        data["folders"] = [f for f in folders if f not in doomed]
+        # unassign any entity filed under a removed node (or its descendants)
         for entity in data.get("entities", []):
-            if entity.get("attrs", {}).get("folder") == name:
+            folder = entity.get("attrs", {}).get("folder")
+            if folder is not None and (folder == name or folder.startswith(prefix)):
                 entity["attrs"].pop("folder", None)
         self._write_json(data)
         return data["folders"]

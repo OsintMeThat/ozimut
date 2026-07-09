@@ -204,3 +204,64 @@ def test_delete_folder_unassigns_entities(client):
     entity = next(e for e in data["entities"] if e["id"] == ent["id"])
     assert "folder" not in entity["attrs"]
 
+
+def test_nested_folder_materialises_ancestors(client):
+    cid = client.post("/api/cases", json={"name": "Nested"}).json()["id"]
+
+    # creating a leaf path also creates every ancestor node
+    folders = client.post(
+        f"/api/cases/{cid}/folders", json={"name": "Sources/Telegram/Group A"}
+    ).json()
+    assert folders == ["Sources", "Sources/Telegram", "Sources/Telegram/Group A"]
+
+    # segments are trimmed and empty ones dropped
+    folders = client.post(
+        f"/api/cases/{cid}/folders", json={"name": " Sources / Signal "}
+    ).json()
+    assert "Sources/Signal" in folders
+
+
+def test_delete_folder_cascades_subtree(client):
+    cid = client.post("/api/cases", json={"name": "Cascade"}).json()["id"]
+    client.post(f"/api/cases/{cid}/folders", json={"name": "Sources/Telegram"})
+    deep = client.post(
+        f"/api/cases/{cid}/entities",
+        json={"type": "note", "label": "chat log",
+              "attrs": {"folder": "Sources/Telegram"}},
+    ).json()
+
+    # deleting the parent removes the whole subtree and unfiles its entities
+    remaining = client.delete(
+        f"/api/cases/{cid}/folders", params={"name": "Sources"}
+    ).json()
+    assert remaining == []
+    data = client.get(f"/api/cases/{cid}").json()
+    entity = next(e for e in data["entities"] if e["id"] == deep["id"])
+    assert "folder" not in entity["attrs"]
+
+
+def test_delete_media_entity_removes_file(client):
+    import io
+
+    cid = client.post("/api/cases", json={"name": "Sync"}).json()["id"]
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00"
+        b"\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    item = client.post(
+        f"/api/cases/{cid}/media/upload",
+        files={"file": ("frame.png", io.BytesIO(png), "image/png")},
+    ).json()["item"]
+    entity = next(
+        e for e in client.get(f"/api/cases/{cid}").json()["entities"]
+        if e["type"] == "media"
+    )
+
+    # deleting the media entity from the sidebar deletes the underlying file too
+    client.delete(f"/api/cases/{cid}/entities/{entity['id']}")
+    assert client.get(f"/files/{cid}/{item['path']}").status_code == 404
+    assert not any(
+        e["type"] == "media" for e in client.get(f"/api/cases/{cid}").json()["entities"]
+    )
+

@@ -250,12 +250,29 @@ def registries() -> dict[str, Any]:
     }
 
 
-def run_analysis(case: Case, rel_path: str, name: str, params: dict[str, Any]) -> dict[str, Any]:
+def run_analysis(
+    case: Case,
+    rel_path: str,
+    name: str,
+    params: dict[str, Any],
+    *,
+    time_s: float | None = None,
+    ops: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Run a read-only analysis on a filed image or a transient frame recipe.
+
+    ``time_s``/``ops`` let the Inspect session analyse a not-yet-saved frame
+    (extracted from ``rel_path`` at ``time_s``, optionally adjusted) without filing
+    anything. Plain image analysis (no ``time_s``/``ops``) keeps the original file
+    open so metadata analyses (EXIF) still see it.
+    """
     analysis = ANALYSES.get(name)
     if analysis is None:
         raise ValueError(f"unknown analysis {name!r}")
-    with Image.open(case.resolve_inside(rel_path)) as img:
-        return analysis.run(img, params or {})
+    if time_s is None and not ops:
+        with Image.open(case.resolve_inside(rel_path)) as img:
+            return analysis.run(img, params or {})
+    return analysis.run(_source_image(case, rel_path, time_s, ops), params or {})
 
 
 # ---------------------------------------------------------------------------
@@ -440,4 +457,244 @@ def collage(
     result = media_engine.import_image(case, canvas, name, source, by="inspect")
     if label and not result.get("duplicate"):
         media_engine.update_media(case, result["item"]["path"], {"label": label})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Session workspace: recipes -> filed entities (Inspect Selection/Frame/Collage/Save)
+# ---------------------------------------------------------------------------
+#
+# The Inspect UI is a scratch workspace: frames, adjustments and a collage layout
+# live in the browser as *recipes* (``{path, time?, ops[]}``) and nothing enters the
+# case until an explicit Save. These functions turn a recipe back into pixels and
+# file the result — full-res and reproducible, so provenance stays honest (spec §6).
+
+
+def _source_image(
+    case: Case, rel_path: str, time_s: float | None = None, ops: list[dict[str, Any]] | None = None
+) -> Image.Image:
+    """Materialise a recipe into a PIL image (no filing).
+
+    ``time_s`` set → decode that frame from the video ``rel_path``; otherwise open
+    the image at ``rel_path``. ``ops`` (the adjust/crop pipeline) are applied last.
+    """
+    if time_s is not None:
+        img = extract_frame(case.resolve_inside(rel_path), time_s)
+    else:
+        img = Image.open(case.resolve_inside(rel_path))
+        img.load()
+    if ops:
+        img = apply_ops(img, ops)
+    return img
+
+
+def preview_frame_png(case: Case, video_rel: str, time_s: float) -> bytes:
+    """Decode one video frame and return PNG bytes — for the transient tray only."""
+    frame = extract_frame(case.resolve_inside(video_rel), time_s)
+    buf = io.BytesIO()
+    frame.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def render_preview_png(
+    case: Case, rel_path: str, *, time_s: float | None = None, ops: list[dict[str, Any]] | None = None
+) -> bytes:
+    """Render a recipe (video frame or image + ops) to PNG bytes — no filing.
+
+    Backs collage snapshots and rebuilding previews when a saved session reopens.
+    """
+    buf = io.BytesIO()
+    _source_image(case, rel_path, time_s, ops).convert("RGB").save(buf, "PNG")
+    return buf.getvalue()
+
+
+def save_frame(
+    case: Case,
+    rel_path: str,
+    *,
+    time_s: float | None = None,
+    ops: list[dict[str, Any]] | None = None,
+    label: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
+    """File one tray frame (a video frame or an adjusted image) as case media."""
+    image = _source_image(case, rel_path, time_s, ops)
+    stem = Path(rel_path).stem[:40]
+    if time_s is not None:
+        tag, op = f"_t{time_s:.2f}s", "frame"
+    else:
+        tag, op = "_edit", "adjust"
+    name = f"{stem}{tag}_{_stamp()}.png"
+    source = _derivation(
+        rel_path, _source_sha(case, rel_path), op=op,
+        **({"time": round(time_s, 3)} if time_s is not None else {}),
+        **({"ops": ops} if ops else {}),
+    )
+    result = media_engine.import_image(case, image, name, source, by="inspect")
+    if not result.get("duplicate"):
+        patch: dict[str, Any] = {}
+        if label:
+            patch["label"] = label
+        if folder:
+            patch["folder"] = folder
+        if patch:
+            media_engine.update_media(case, result["item"]["path"], patch)
+    return result
+
+
+def _solve_linear(matrix: list[list[float]], rhs: list[float]) -> list[float]:
+    """Gaussian elimination with partial pivoting (small square systems, no numpy)."""
+    n = len(rhs)
+    a = [row[:] + [rhs[i]] for i, row in enumerate(matrix)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(a[r][col]))
+        if abs(a[pivot][col]) < 1e-12:
+            raise ValueError("degenerate perspective quad")
+        a[col], a[pivot] = a[pivot], a[col]
+        pv = a[col][col]
+        a[col] = [v / pv for v in a[col]]
+        for r in range(n):
+            if r != col and a[r][col]:
+                factor = a[r][col]
+                a[r] = [v - factor * a[col][i] for i, v in enumerate(a[r])]
+    return [a[i][n] for i in range(n)]
+
+
+def _perspective_coeffs(dst_quad: list[list[float]], src_quad: list[list[float]]) -> list[float]:
+    """8 coeffs for ``Image.transform(PERSPECTIVE)`` mapping ``dst_quad``→``src_quad``.
+
+    PIL samples the *output* pixel and needs the matching *input* coordinate, so we
+    solve for the map from destination (canvas) corners to source-image corners.
+    """
+    matrix, rhs = [], []
+    for (x, y), (u, v) in zip(dst_quad, src_quad):
+        matrix.append([x, y, 1, 0, 0, 0, -u * x, -u * y])
+        matrix.append([0, 0, 0, x, y, 1, -v * x, -v * y])
+        rhs.extend((u, v))
+    return _solve_linear(matrix, rhs)
+
+
+def compose_perspective(
+    case: Case,
+    *,
+    width: int,
+    height: int,
+    nodes: list[dict[str, Any]],
+    background: str | None = "#12141c",
+    label: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
+    """Composite tray/case images, each warped into a 4-point quad, onto a canvas.
+
+    ``nodes`` are painted in order (later = on top); each is
+    ``{"src": {path, time?, ops[]}, "quad": [[x,y]×4]}`` with the quad in canvas
+    pixels (top-left, top-right, bottom-right, bottom-left). A falsy ``background``
+    yields a transparent (RGBA) canvas so the saved PNG carries only the pieces.
+    """
+    if not nodes:
+        raise ValueError("collage needs at least one image")
+    width = max(16, min(int(width), 8192))
+    height = max(16, min(int(height), 8192))
+    canvas = (
+        Image.new("RGB", (width, height), background)
+        if background
+        else Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    )
+
+    sources: list[str] = []
+    for node in nodes:
+        spec = node.get("src") or {}
+        rel = spec.get("path")
+        if not rel:
+            raise ValueError("collage node is missing a source path")
+        img = _source_image(case, rel, spec.get("time"), spec.get("ops")).convert("RGB")
+        w, h = img.size
+        src_corners = [[0, 0], [w, 0], [w, h], [0, h]]
+        quad = [[float(x), float(y)] for x, y in node["quad"]]
+        coeffs = _perspective_coeffs(quad, src_corners)
+        warped = img.transform((width, height), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
+        mask = Image.new("L", (w, h), 255).transform(
+            (width, height), Image.PERSPECTIVE, coeffs, Image.BICUBIC
+        )
+        canvas.paste(warped, (0, 0), mask)
+        sources.append(rel)
+
+    source = _derivation("", None, op="collage", sources=sources, perspective=True)
+    name = f"collage_{_stamp()}.png"
+    result = media_engine.import_image(case, canvas, name, source, by="inspect")
+    if not result.get("duplicate"):
+        patch: dict[str, Any] = {}
+        if label:
+            patch["label"] = label
+        if folder:
+            patch["folder"] = folder
+        if patch:
+            media_engine.update_media(case, result["item"]["path"], patch)
+    return result
+
+
+# Map the frontend's css-filter values (multiplicative, 1.0 = neutral) to ffmpeg's
+# `eq` filter, whose brightness is additive. Only the css-previewable filters carry
+# over to video; grayscale/invert are handled as saturation/negate.
+def _eq_filterchain(params: dict[str, Any]) -> str | None:
+    def val(key, default):
+        try:
+            return float(params.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    eq = {
+        "brightness": round(val("brightness", 1.0) - 1.0, 4),
+        "contrast": round(val("contrast", 1.0), 4),
+        "saturation": 0.0 if val("grayscale", 0) >= 1 else round(val("saturation", 1.0), 4),
+        "gamma": round(val("gamma", 1.0), 4),
+    }
+    neutral = {"brightness": 0.0, "contrast": 1.0, "saturation": 1.0, "gamma": 1.0}
+    parts = [f"eq={':'.join(f'{k}={v}' for k, v in eq.items())}"] if eq != neutral else []
+    if val("invert", 0) >= 1:
+        parts.append("negate")
+    return ",".join(parts) or None
+
+
+def enhance_video(
+    case: Case,
+    video_rel: str,
+    params: dict[str, Any],
+    *,
+    label: str | None = None,
+    folder: str | None = None,
+) -> dict[str, Any]:
+    """Re-encode a video with the gear's adjustments and file it as new media."""
+    if not media_engine.ffmpeg_available():
+        raise RuntimeError("ffmpeg is required to enhance video")
+    vf = _eq_filterchain(params)
+    if not vf:
+        raise ValueError("no adjustments to apply — tune the gear first")
+
+    src = case.resolve_inside(video_rel)
+    stem = Path(src.name).stem[:40]
+    tmp = case.subdir("media") / f".enhance_{_stamp()}.mp4"
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+             "-vf", vf, "-c:a", "copy", str(tmp)],
+            capture_output=True, timeout=600,
+        )
+        if proc.returncode != 0 or not tmp.exists():
+            raise RuntimeError(
+                (proc.stderr or b"").decode("utf-8", "replace").strip() or "video enhance failed"
+            )
+        name = f"{stem}_enhanced_{_stamp()}.mp4"
+        source = _derivation(video_rel, _source_sha(case, video_rel), op="enhance-video", params=params)
+        result = media_engine.import_produced_file(case, tmp, name, source, by="inspect")
+    finally:
+        tmp.unlink(missing_ok=True)
+    if not result.get("duplicate"):
+        patch: dict[str, Any] = {}
+        if label:
+            patch["label"] = label
+        if folder:
+            patch["folder"] = folder
+        if patch:
+            media_engine.update_media(case, result["item"]["path"], patch)
     return result

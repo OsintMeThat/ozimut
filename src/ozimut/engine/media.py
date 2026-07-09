@@ -169,7 +169,24 @@ def import_image(
     if not name.lower().endswith(".png"):
         name = f"{Path(name).stem}.png"
     dest = unique_path(media_dir, name)
-    image.convert("RGB").save(dest, "PNG")
+    # Preserve an alpha channel (e.g. a transparent collage canvas); everything
+    # else is flattened to RGB. The thumbnail stage composites alpha over black.
+    image.save(dest, "PNG") if image.mode == "RGBA" else image.convert("RGB").save(dest, "PNG")
+    return _register(case, dest, source, by=by)
+
+
+def import_produced_file(
+    case: Case, src_path: Path, filename: str, source: dict[str, Any], *, by: str = "inspect"
+) -> dict[str, Any]:
+    """File a tool-produced file (e.g. an ffmpeg-enhanced video) into the case.
+
+    Unlike ``import_image`` (PNG only) this keeps the produced container/codec and,
+    unlike ``import_stream``, records a derivation ``source`` so the output stays
+    auditable back to its origin (spec §6). The source file is moved into ``media/``.
+    """
+    media_dir = case.subdir("media")
+    dest = unique_path(media_dir, safe_filename(filename))
+    shutil.move(str(src_path), str(dest))
     return _register(case, dest, source, by=by)
 
 

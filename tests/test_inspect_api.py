@@ -159,6 +159,275 @@ def test_analyze_unknown_is_rejected(client):
     assert res.status_code == 422
 
 
+# -- session workspace: recipes -> filed entities (Save gate) ----------------
+
+
+def test_save_frames_files_selected_images_into_folder(client):
+    cid = client.post("/api/cases", json={"name": "Save"}).json()["id"]
+    item = _upload(client, cid, "orig.png")
+    before = len(client.get(f"/api/cases/{cid}/media").json())
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/save-frames",
+        json={
+            "items": [
+                {"path": item["path"], "ops": [{"op": "brightness", "params": {"amount": 1.5}}],
+                 "label": "Tuned"}
+            ],
+            "folder": "Frames",
+        },
+    ).json()
+    saved = res["saved"]
+    assert len(saved) == 1 and saved[0]["duplicate"] is False
+
+    listing = client.get(f"/api/cases/{cid}/media").json()
+    assert len(listing) == before + 1
+    new_path = saved[0]["item"]["path"]
+    entity = next(
+        e for e in client.get(f"/api/cases/{cid}").json()["entities"]
+        if e["attrs"].get("path") == new_path
+    )
+    assert entity["attrs"]["folder"] == "Frames"
+    assert entity["provenance"]["by"] == "inspect"
+
+
+def test_compose_perspective_files_one_collage(client):
+    cid = client.post("/api/cases", json={"name": "Compose"}).json()["id"]
+    a = _upload(client, cid, "a.png", _png_bytes(color=(10, 20, 30), size=(80, 60)))
+    b = _upload(client, cid, "b.png", _png_bytes(color=(200, 100, 50), size=(80, 60)))
+    before = len(client.get(f"/api/cases/{cid}/media").json())
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/compose",
+        json={
+            "width": 400, "height": 300,
+            "nodes": [
+                {"src": {"path": a["path"]},
+                 "quad": [[0, 0], [200, 10], [190, 300], [0, 290]]},
+                {"src": {"path": b["path"]},
+                 "quad": [[200, 10], [400, 0], [400, 300], [190, 300]]},
+            ],
+        },
+    ).json()
+    assert res["duplicate"] is False
+    assert len(client.get(f"/api/cases/{cid}/media").json()) == before + 1
+    probe = client.get(
+        f"/api/cases/{cid}/inspect/probe", params={"path": res["item"]["path"]}
+    ).json()
+    assert probe["width"] == 400 and probe["height"] == 300
+    listing = client.get(f"/api/cases/{cid}/media").json()
+    collage = next(m for m in listing if m["path"] == res["item"]["path"])
+    assert collage["source"]["op"] == "collage" and collage["source"]["perspective"] is True
+
+
+def test_compose_transparent_background_keeps_alpha(client):
+    cid = client.post("/api/cases", json={"name": "Alpha"}).json()["id"]
+    a = _upload(client, cid, "a.png", _png_bytes(color=(10, 20, 30), size=(80, 60)))
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/compose",
+        json={
+            "width": 400, "height": 300, "background": None,
+            "nodes": [
+                {"src": {"path": a["path"]},
+                 "quad": [[20, 20], [120, 20], [120, 100], [20, 100]]},
+            ],
+        },
+    ).json()
+    assert res["duplicate"] is False
+
+    png = client.get(f"/files/{cid}/{res['item']['path']}").content
+    img = Image.open(io.BytesIO(png))
+    assert img.mode == "RGBA"
+    # a corner outside every quad stays fully transparent
+    assert img.getpixel((0, 0))[3] == 0
+    # a pixel inside the placed piece is opaque
+    assert img.getpixel((60, 60))[3] == 255
+
+
+def test_compose_requires_nodes(client):
+    cid = client.post("/api/cases", json={"name": "NoNodes"}).json()["id"]
+    res = client.post(
+        f"/api/cases/{cid}/inspect/compose", json={"width": 100, "height": 100, "nodes": []}
+    )
+    assert res.status_code == 422
+
+
+def test_analyze_accepts_transient_ops_without_filing(client):
+    cid = client.post("/api/cases", json={"name": "AnalyzeOps"}).json()["id"]
+    item = _upload(client, cid, "img.png", _png_bytes(color=(255, 0, 0), size=(20, 20)))
+    before = len(client.get(f"/api/cases/{cid}/media").json())
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/analyze",
+        json={"path": item["path"], "name": "histogram",
+              "ops": [{"op": "invert", "params": {"on": 1}}]},
+    ).json()
+    assert res["kind"] == "histogram"
+    # inverting pure red pushes the red channel to 0
+    assert res["channels"]["r"][0] == 400
+    # analysing a transient recipe files nothing
+    assert len(client.get(f"/api/cases/{cid}/media").json()) == before
+
+
+@pytest.mark.skipif(not media_engine.ffmpeg_available(), reason="ffmpeg not installed")
+def test_frame_preview_returns_png_without_filing(client, tmp_path):
+    import subprocess
+
+    video = tmp_path / "clip.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc=duration=2:size=160x120:rate=10", str(video)],
+        check=True,
+    )
+    cid = client.post("/api/cases", json={"name": "Preview"}).json()["id"]
+    with video.open("rb") as fh:
+        item = client.post(
+            f"/api/cases/{cid}/media/upload", files={"file": ("clip.mp4", fh, "video/mp4")}
+        ).json()["item"]
+    before = len(client.get(f"/api/cases/{cid}/media").json())
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/frame/preview", json={"path": item["path"], "time": 1.0}
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert Image.open(io.BytesIO(res.content)).size == (160, 120)
+    # a preview never files anything
+    assert len(client.get(f"/api/cases/{cid}/media").json()) == before
+
+
+@pytest.mark.skipif(not media_engine.ffmpeg_available(), reason="ffmpeg not installed")
+def test_enhance_video_files_new_video(client, tmp_path):
+    import subprocess
+
+    video = tmp_path / "clip.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc=duration=1:size=160x120:rate=10", str(video)],
+        check=True,
+    )
+    cid = client.post("/api/cases", json={"name": "Enhance"}).json()["id"]
+    with video.open("rb") as fh:
+        item = client.post(
+            f"/api/cases/{cid}/media/upload", files={"file": ("clip.mp4", fh, "video/mp4")}
+        ).json()["item"]
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/enhance-video",
+        json={"path": item["path"], "params": {"brightness": 1.3, "contrast": 1.2},
+              "folder": "Enhanced"},
+    ).json()
+    assert res["duplicate"] is False
+    new_path = res["item"]["path"]
+    assert new_path.endswith(".mp4")
+    probe = client.get(
+        f"/api/cases/{cid}/inspect/probe", params={"path": new_path}
+    ).json()
+    assert probe["kind"] == "video"
+    entity = next(
+        e for e in client.get(f"/api/cases/{cid}").json()["entities"]
+        if e["attrs"].get("path") == new_path
+    )
+    assert entity["attrs"]["folder"] == "Enhanced"
+
+
+def test_render_preview_applies_ops_without_filing(client):
+    cid = client.post("/api/cases", json={"name": "Render"}).json()["id"]
+    item = _upload(client, cid, "img.png", _png_bytes(color=(255, 0, 0), size=(30, 20)))
+    before = len(client.get(f"/api/cases/{cid}/media").json())
+
+    res = client.post(
+        f"/api/cases/{cid}/inspect/render-preview",
+        json={"path": item["path"], "ops": [{"op": "crop", "params": {"x": 0, "y": 0, "w": 0.5, "h": 1}}]},
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+    assert Image.open(io.BytesIO(res.content)).size == (15, 20)  # cropped to half width
+    assert len(client.get(f"/api/cases/{cid}/media").json()) == before  # nothing filed
+
+
+def test_session_save_list_load_delete_roundtrip(client):
+    cid = client.post("/api/cases", json={"name": "Session"}).json()["id"]
+    item = _upload(client, cid, "clip.png")
+    spec = {
+        "source": {"path": item["path"], "kind": "image"},
+        "videoAdjust": {},
+        "frames": [{"id": "fr1", "path": item["path"], "time": None, "adjust": {"brightness": 1.4}, "crop": None}],
+        "collage": {"width": 800, "height": 400, "background": "#101010", "nodes": []},
+    }
+    saved = client.post(
+        f"/api/cases/{cid}/inspect/sessions", json={"title": "My session", "spec": spec}
+    ).json()
+    assert saved["name"] == "my-session"
+
+    listing = client.get(f"/api/cases/{cid}/inspect/sessions").json()
+    assert len(listing) == 1 and listing[0]["title"] == "My session" and listing[0]["frames"] == 1
+
+    # an inspect-session entity is upserted so it reopens from the sidebar
+    entities = client.get(f"/api/cases/{cid}").json()["entities"]
+    ent = next(e for e in entities if e["type"] == "inspect-session")
+    assert ent["attrs"]["spec"] == "inspect/my-session.json"
+
+    loaded = client.get(f"/api/cases/{cid}/inspect/sessions/my-session").json()
+    assert loaded["ozimut_inspect"] == 1
+    assert loaded["frames"][0]["adjust"]["brightness"] == 1.4
+
+    # re-saving under the same title updates in place (no duplicate entity)
+    client.post(f"/api/cases/{cid}/inspect/sessions", json={"title": "My session", "spec": spec})
+    entities = client.get(f"/api/cases/{cid}").json()["entities"]
+    assert sum(1 for e in entities if e["type"] == "inspect-session") == 1
+
+    client.delete(f"/api/cases/{cid}/inspect/sessions/my-session")
+    assert client.get(f"/api/cases/{cid}/inspect/sessions").json() == []
+    entities = client.get(f"/api/cases/{cid}").json()["entities"]
+    assert not any(e["type"] == "inspect-session" for e in entities)
+
+
+def test_session_resave_by_name_overwrites_after_rename(client):
+    # Reopening a session then saving it re-uses its slug (name), so a title
+    # change updates the same session in place instead of forking a new one.
+    cid = client.post("/api/cases", json={"name": "Rename"}).json()["id"]
+    item = _upload(client, cid, "clip.png")
+    spec = {"source": {"path": item["path"], "kind": "image"}, "frames": [], "collage": {"nodes": []}}
+
+    first = client.post(
+        f"/api/cases/{cid}/inspect/sessions", json={"title": "Original", "spec": spec}
+    ).json()
+    assert first["name"] == "original"
+
+    client.post(
+        f"/api/cases/{cid}/inspect/sessions",
+        json={"name": first["name"], "title": "Renamed", "spec": spec},
+    )
+    listing = client.get(f"/api/cases/{cid}/inspect/sessions").json()
+    assert len(listing) == 1
+    assert listing[0]["name"] == "original" and listing[0]["title"] == "Renamed"
+    entities = client.get(f"/api/cases/{cid}").json()["entities"]
+    assert sum(1 for e in entities if e["type"] == "inspect-session") == 1
+
+
+@pytest.mark.skipif(not media_engine.ffmpeg_available(), reason="ffmpeg not installed")
+def test_enhance_video_rejects_neutral_params(client, tmp_path):
+    import subprocess
+
+    video = tmp_path / "clip.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "testsrc=duration=1:size=160x120:rate=10", str(video)],
+        check=True,
+    )
+    cid = client.post("/api/cases", json={"name": "Neutral"}).json()["id"]
+    with video.open("rb") as fh:
+        item = client.post(
+            f"/api/cases/{cid}/media/upload", files={"file": ("clip.mp4", fh, "video/mp4")}
+        ).json()["item"]
+    res = client.post(
+        f"/api/cases/{cid}/inspect/enhance-video", json={"path": item["path"], "params": {}}
+    )
+    assert res.status_code == 422
+
+
 @pytest.mark.skipif(not media_engine.ffmpeg_available(), reason="ffmpeg not installed")
 def test_frame_capture_from_video(client, tmp_path):
     import subprocess
