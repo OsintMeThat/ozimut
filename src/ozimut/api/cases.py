@@ -21,6 +21,18 @@ def get_case(case_id: str) -> Case:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _ensure_name_free(name: str, *, exclude_id: str | None = None) -> None:
+    """Reject a case name already taken by another (non-scratch) case, matched
+    case-insensitively on the trimmed name. ``exclude_id`` lets a rename keep
+    its own name."""
+    wanted = name.strip().casefold()
+    for c in Case.list_all():
+        if c.get("scratch") or c["id"] == exclude_id:
+            continue
+        if str(c.get("name", "")).strip().casefold() == wanted:
+            raise HTTPException(status_code=409, detail=f"a case named '{name}' already exists")
+
+
 def _unlink_inside(case: Case, rel_path: str) -> None:
     try:
         case.resolve_inside(rel_path).unlink(missing_ok=True)
@@ -72,6 +84,7 @@ def list_cases() -> list[dict[str, Any]]:
 
 @router.post("")
 def create_case(body: CreateCase) -> dict[str, Any]:
+    _ensure_name_free(body.name)
     try:
         case = Case.create(body.name)
     except CaseError as exc:
@@ -94,6 +107,7 @@ def read_case(case_id: str) -> dict[str, Any]:
 @router.post("/{case_id}/promote")
 def promote_case(case_id: str, body: PromoteCase) -> dict[str, Any]:
     case = get_case(case_id)
+    _ensure_name_free(body.name)
     try:
         promoted = case.promote(body.name)
     except CaseError as exc:
@@ -104,6 +118,7 @@ def promote_case(case_id: str, body: PromoteCase) -> dict[str, Any]:
 @router.patch("/{case_id}")
 def rename_case(case_id: str, body: CreateCase) -> dict[str, Any]:
     case = get_case(case_id)
+    _ensure_name_free(body.name, exclude_id=case.id)
     case.rename(body.name)
     return {"id": case.id, **case.read()}
 
@@ -163,8 +178,9 @@ def remove_entity(case_id: str, entity_id: str) -> dict[str, str]:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"status": "deleted"}
 
-    # other artifact-backed types: drop the file(s) before removing the row
-    if etype == "place" and attrs.get("path"):
+    # other artifact-backed types: drop the file(s) before removing the row.
+    # captures carry the image; a bare place (no path) has nothing on disk.
+    if etype in ("capture", "place") and attrs.get("path"):
         satellite_engine.unlink_capture(case, attrs["path"])
     elif etype == "proof" and attrs.get("spec"):
         _unlink_inside(case, attrs["spec"])

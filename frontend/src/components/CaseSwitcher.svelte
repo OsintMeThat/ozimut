@@ -5,16 +5,54 @@
     openCase,
     createCase,
     promoteCase,
+    renameCase,
     closeCase,
+    deleteCase,
     toast,
   } from '../lib/state.svelte.js';
   import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
 
   let open = $state(false);
-  let modal = $state(null); // 'create' | 'promote' | null
+  let modal = $state(null); // 'create' | 'promote' | 'rename' | null
   let nameInput = $state('');
   let busy = $state(false);
+  let renameId = $state(null); // id of the case being renamed (modal === 'rename')
+
+  function askRename(c) {
+    open = false;
+    modal = 'rename';
+    renameId = c.id;
+    nameInput = c.name ?? c.id;
+  }
+
+  // Delete flow: the whole case folder is wiped, so we make the user type
+  // DELETE (uppercase) to confirm. `delTarget` holds the case being deleted.
+  let delTarget = $state(null); // { id, name } | null
+  let delConfirm = $state('');
+  let delBusy = $state(false);
+  const delReady = $derived(delConfirm === 'DELETE');
+
+  function askDelete(c) {
+    open = false;
+    delTarget = { id: c.id, name: c.name ?? c.id };
+    delConfirm = '';
+  }
+
+  async function confirmDelete() {
+    if (!delReady || delBusy || !delTarget) return;
+    delBusy = true;
+    try {
+      await deleteCase(delTarget.id);
+      toast(`Case “${delTarget.name}” deleted`, 'ok');
+      delTarget = null;
+      delConfirm = '';
+    } catch (e) {
+      toast(e.message, 'danger');
+    } finally {
+      delBusy = false;
+    }
+  }
 
   async function toggle() {
     open = !open;
@@ -27,17 +65,22 @@
   }
 
   async function submit() {
-    if (!nameInput.trim() || busy) return;
+    const name = nameInput.trim();
+    if (!name || busy || nameTaken) return;
     busy = true;
     try {
       if (modal === 'create') {
-        await createCase(nameInput.trim());
-        toast(`Case “${nameInput.trim()}” created`, 'ok');
+        await createCase(name);
+        toast(`Case “${name}” created`, 'ok');
       } else if (modal === 'promote') {
-        await promoteCase(nameInput.trim());
+        await promoteCase(name);
+      } else if (modal === 'rename') {
+        await renameCase(renameId, name);
+        toast(`Renamed to “${name}”`, 'ok');
       }
       modal = null;
       nameInput = '';
+      renameId = null;
     } catch (e) {
       toast(e.message, 'danger');
     } finally {
@@ -47,6 +90,17 @@
 
   const named = $derived(caseState.list.filter((c) => !c.scratch));
   const scratches = $derived(caseState.list.filter((c) => c.scratch));
+
+  // Guard against duplicate names (case-insensitive) — the backend enforces
+  // this too, but flag it early so the button disables instead of erroring.
+  const nameTaken = $derived(
+    !!nameInput.trim() &&
+      named.some(
+        (c) =>
+          c.id !== renameId &&
+          c.name.trim().toLowerCase() === nameInput.trim().toLowerCase()
+      )
+  );
 </script>
 
 <div class="switcher">
@@ -94,20 +148,33 @@
       {#if named.length}
         <div class="section">Cases</div>
         {#each named as c (c.id)}
-          <button class="item" class:active={c.id === caseState.current?.id} onclick={() => pick(c.id)}>
-            <Icon name="folder" size={15} />
-            <span class="grow">{c.name}</span>
-            <span class="meta">{c.entity_count} entities</span>
-          </button>
+          <div class="row" class:active={c.id === caseState.current?.id}>
+            <button class="item" onclick={() => pick(c.id)}>
+              <Icon name="folder" size={15} />
+              <span class="grow">{c.name}</span>
+              <span class="meta">{c.entity_count} entities</span>
+            </button>
+            <button class="del rename" title="Rename case" onclick={() => askRename(c)}>
+              <Icon name="edit" size={14} />
+            </button>
+            <button class="del" title="Delete case" onclick={() => askDelete(c)}>
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
         {/each}
       {/if}
       {#if scratches.length}
         <div class="section">Scratch sessions</div>
         {#each scratches as c (c.id)}
-          <button class="item" class:active={c.id === caseState.current?.id} onclick={() => pick(c.id)}>
-            <Icon name="clock" size={15} />
-            <span class="grow">{c.id}</span>
-          </button>
+          <div class="row" class:active={c.id === caseState.current?.id}>
+            <button class="item" onclick={() => pick(c.id)}>
+              <Icon name="clock" size={15} />
+              <span class="grow">{c.id}</span>
+            </button>
+            <button class="del" title="Delete session" onclick={() => askDelete(c)}>
+              <Icon name="trash" size={14} />
+            </button>
+          </div>
         {/each}
       {/if}
       {#if !named.length && !scratches.length}
@@ -119,7 +186,11 @@
 
 {#if modal}
   <Modal
-    title={modal === 'create' ? 'New case' : 'Keep this session as a case'}
+    title={modal === 'create'
+      ? 'New case'
+      : modal === 'rename'
+        ? 'Rename case'
+        : 'Keep this session as a case'}
     onclose={() => (modal = null)}
   >
     <form
@@ -137,10 +208,58 @@
         bind:value={nameInput}
         autofocus
       />
+      {#if nameTaken}
+        <p class="err">A case with this name already exists — pick another.</p>
+      {/if}
       <div class="actions">
         <button type="button" class="btn" onclick={() => (modal = null)}>Cancel</button>
-        <button type="submit" class="btn btn-primary" disabled={!nameInput.trim() || busy}>
-          {modal === 'create' ? 'Create' : 'Promote'}
+        <button
+          type="submit"
+          class="btn btn-primary"
+          disabled={!nameInput.trim() || busy || nameTaken}
+        >
+          {modal === 'create' ? 'Create' : modal === 'rename' ? 'Rename' : 'Promote'}
+        </button>
+      </div>
+    </form>
+  </Modal>
+{/if}
+
+{#if delTarget}
+  <Modal title="Delete case" onclose={() => (delTarget = null)}>
+    <div class="warn">
+      <span class="warn-badge"><Icon name="trash" size={18} /></span>
+      <div>
+        <p class="warn-title">
+          You will lose everything in “{delTarget.name}”.
+        </p>
+        <p class="warn-body">
+          This permanently deletes the whole case folder and all its contents —
+          media, satellite crops, proofs, exports and notes. This cannot be
+          undone.
+        </p>
+      </div>
+    </div>
+    <form
+      onsubmit={(e) => {
+        e.preventDefault();
+        confirmDelete();
+      }}
+    >
+      <label class="label" for="del-confirm">Type <b>DELETE</b> to confirm</label>
+      <!-- svelte-ignore a11y_autofocus -->
+      <input
+        id="del-confirm"
+        class="input"
+        placeholder="DELETE"
+        bind:value={delConfirm}
+        autocomplete="off"
+        autofocus
+      />
+      <div class="actions">
+        <button type="button" class="btn" onclick={() => (delTarget = null)}>Cancel</button>
+        <button type="submit" class="btn btn-danger" disabled={!delReady || delBusy}>
+          {delBusy ? 'Deleting…' : 'Delete everything'}
         </button>
       </div>
     </form>
@@ -204,6 +323,43 @@
     color: var(--text-3);
     padding: 10px 10px 4px;
   }
+  .row {
+    display: flex;
+    align-items: center;
+    border-radius: var(--r-sm);
+  }
+  .row:hover {
+    background: var(--bg-2);
+  }
+  .row.active {
+    background: var(--accent-soft);
+  }
+  .row.active .item {
+    color: var(--accent);
+  }
+  .row .item {
+    flex: 1;
+    min-width: 0;
+    background: none;
+  }
+  .row .item:hover {
+    background: none;
+  }
+  .del {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    padding: 8px 10px;
+    color: var(--text-3);
+    opacity: 0;
+    border-radius: var(--r-sm);
+  }
+  .row:hover .del {
+    opacity: 1;
+  }
+  .del:hover {
+    color: var(--danger, #e5484d);
+  }
   .item {
     display: flex;
     align-items: center;
@@ -221,6 +377,42 @@
   .item.active {
     background: var(--accent-soft);
     color: var(--accent);
+  }
+  .warn {
+    display: flex;
+    gap: 13px;
+    align-items: flex-start;
+    margin-bottom: 16px;
+  }
+  .warn-badge {
+    flex-shrink: 0;
+    width: 38px;
+    height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--danger, #e5484d) 16%, transparent);
+    color: var(--danger, #e5484d);
+  }
+  .warn-title {
+    font-size: var(--fs-sm);
+    font-weight: 700;
+    color: var(--text-1);
+    margin-bottom: 4px;
+  }
+  .warn-body {
+    font-size: var(--fs-xs);
+    color: var(--text-3);
+    line-height: 1.45;
+  }
+  .btn-danger {
+    background: var(--danger, #e5484d);
+    color: #fff;
+    border-color: transparent;
+  }
+  .btn-danger:hover:not(:disabled) {
+    filter: brightness(1.08);
   }
   .item.new {
     color: var(--accent);
@@ -240,6 +432,11 @@
     padding: 14px 10px;
     color: var(--text-3);
     font-size: var(--fs-sm);
+  }
+  .err {
+    font-size: var(--fs-xs);
+    color: var(--danger, #e5484d);
+    margin-top: 8px;
   }
   .actions {
     display: flex;
