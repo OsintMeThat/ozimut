@@ -41,6 +41,17 @@ def test_upload_and_list(client):
     assert client.get(f"/files/{cid}/{item['thumbnail']}").status_code == 200
 
 
+def test_listing_carries_category_fields(client):
+    """The Media Library groups items into facets (Images/Videos/Imports/…) purely
+    from ``kind`` and ``source`` — guard that both survive upload + listing."""
+    cid = client.post("/api/cases", json={"name": "Facets"}).json()["id"]
+    _upload(client, cid, "shot.png", _png_bytes())
+
+    item = client.get(f"/api/cases/{cid}/media").json()[0]
+    assert item["kind"] == "image"  # drives the Images facet
+    assert item["source"]["type"] == "upload"  # drives the Imports facet
+
+
 def test_duplicate_detection(client):
     cid = client.post("/api/cases", json={"name": "Dup"}).json()["id"]
     data = _png_bytes(color=(1, 2, 3))
@@ -96,25 +107,26 @@ def test_update_media_notes_and_folder(client):
     assert entity["attrs"]["folder"] == ""
 
 
-def test_update_media_label(client):
-    cid = client.post("/api/cases", json={"name": "Label"}).json()["id"]
+def test_update_media_title(client):
+    cid = client.post("/api/cases", json={"name": "Title"}).json()["id"]
     item = _upload(client, cid, "img.png", _png_bytes()).json()["item"]
 
     updated = client.patch(
         f"/api/cases/{cid}/media",
-        json={"path": item["path"], "label": "Strike video — Kharkiv"},
+        json={"path": item["path"], "title": "Strike video — Kharkiv"},
     ).json()
-    assert updated["label"] == "Strike video — Kharkiv"
+    # the media's own title lives on the sidecar (shown in the Media tab)
+    assert updated["title"] == "Strike video — Kharkiv"
 
-    # entity label updated too
+    # the entity label mirrors the title so the case sidebar stays in sync
     entities = client.get(f"/api/cases/{cid}").json()["entities"]
     assert entities[0]["label"] == "Strike video — Kharkiv"
 
-    # clear label reverts to no custom label
+    # clearing the title reverts to no custom title
     cleared = client.patch(
-        f"/api/cases/{cid}/media", json={"path": item["path"], "label": ""}
+        f"/api/cases/{cid}/media", json={"path": item["path"], "title": ""}
     ).json()
-    assert "label" not in cleared
+    assert "title" not in cleared
 
 
 def test_update_media_clear_notes(client):
