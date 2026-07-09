@@ -146,6 +146,10 @@
     position: absolute;
     top: 0;
     left: 0;
+    /* size is driven by explicit width/height + matrix3d warp; the global
+       `img { max-width: 100% }` would shrink oversized frames below their
+       box and push the warp handles outside the image. */
+    max-width: none;
     transform-origin: 0 0;
     cursor: move;
     user-select: none;
