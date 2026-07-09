@@ -13,20 +13,43 @@
   let jobs = $state([]); // active download jobs: {id, url, progress}
   let fileInput;
 
-  // --- folder filter ---
+  // --- category facets (auto-derived from kind + source) ---
+  // Overlapping filters (a downloaded video matches both Videos and Downloads);
+  // clicking one narrows the grid to that facet. Order matches the sidebar bar.
+  const CATEGORIES = [
+    { key: 'image', label: 'Images', icon: 'image', match: (i) => i.kind === 'image' },
+    { key: 'video', label: 'Videos', icon: 'video', match: (i) => i.kind === 'video' },
+    { key: 'collage', label: 'Collages', icon: 'layers', match: (i) => i.source?.op === 'collage' },
+    { key: 'upload', label: 'Imports', icon: 'upload', match: (i) => i.source?.type === 'upload' },
+    { key: 'download', label: 'Downloads', icon: 'download', match: (i) => i.source?.type === 'download' },
+    { key: 'other', label: 'Other files', icon: 'file', match: (i) => i.kind !== 'image' && i.kind !== 'video' },
+  ];
+
+  let catFilter = $state(null); // null = All types
+
+  const activeCats = $derived(
+    CATEGORIES.map((c) => ({ ...c, count: items.filter(c.match).length })).filter(
+      (c) => c.count > 0
+    )
+  );
+  const catMatch = $derived(CATEGORIES.find((c) => c.key === catFilter)?.match ?? null);
+
+  // --- folder filter (user-defined folders) ---
   let folderFilter = $state(null); // null = All
 
   const folders = $derived(
     [...new Set(items.filter((i) => i.folder).map((i) => i.folder))].sort()
   );
   const filteredItems = $derived(
-    folderFilter ? items.filter((i) => i.folder === folderFilter) : items
+    items.filter(
+      (i) => (!catMatch || catMatch(i)) && (!folderFilter || i.folder === folderFilter)
+    )
   );
 
   // --- info/edit modal ---
   let editItem = $state(null);
   let editNotes = $state('');
-  let editLabel = $state('');
+  let editTitle = $state('');
   let editSaving = $state(false);
 
   // --- lightbox ---
@@ -34,11 +57,12 @@
 
   $effect(() => {
     const id = caseState.current?.id;
+    caseState.rev; // also refetch when the case is reloaded elsewhere (e.g. sidebar edit)
     if (id !== loadedFor) {
       loadedFor = id;
       items = [];
-      if (id) refresh(id);
     }
+    if (id) refresh(id);
   });
 
   async function refresh(id = caseState.current?.id) {
@@ -150,7 +174,7 @@
   function openInfo(item) {
     editItem = item;
     editNotes = item.notes ?? '';
-    editLabel = item.label ?? '';
+    editTitle = item.title ?? '';
   }
 
   async function saveInfo() {
@@ -160,11 +184,13 @@
       const updated = await api.patch(`/api/cases/${caseState.current.id}/media`, {
         path: editItem.path,
         notes: editNotes,
-        label: editLabel,
+        title: editTitle,
       });
       const idx = items.findIndex((i) => i.path === editItem.path);
       if (idx !== -1) items[idx] = updated;
       editItem = null;
+      // mirror the title/notes onto the case sidebar entity live
+      await reloadCase();
       toast('Saved', 'ok', 1600);
     } catch (e) {
       toast(e.message, 'danger');
@@ -222,27 +248,43 @@
     />
   </div>
 
-  <!-- folder filter bar -->
+  <!-- category + folder filter bar -->
   {#if items.length > 0}
     <div class="folder-bar">
+      <!-- type / source facets -->
       <button
         class="folder-chip"
-        class:active={folderFilter === null}
-        onclick={() => (folderFilter = null)}
+        class:active={catFilter === null}
+        onclick={() => (catFilter = null)}
       >
         <Icon name="media" size={13} /> All
         <span class="chip-count">{items.length}</span>
       </button>
-      {#each folders as f (f)}
+      {#each activeCats as c (c.key)}
         <button
           class="folder-chip"
-          class:active={folderFilter === f}
-          onclick={() => (folderFilter = f)}
+          class:active={catFilter === c.key}
+          onclick={() => (catFilter = catFilter === c.key ? null : c.key)}
         >
-          <Icon name="folder" size={13} />{f}
-          <span class="chip-count">{items.filter((i) => i.folder === f).length}</span>
+          <Icon name={c.icon} size={13} />{c.label}
+          <span class="chip-count">{c.count}</span>
         </button>
       {/each}
+
+      <!-- user-defined folders (independent facet) -->
+      {#if folders.length}
+        <span class="bar-sep"></span>
+        {#each folders as f (f)}
+          <button
+            class="folder-chip"
+            class:active={folderFilter === f}
+            onclick={() => (folderFilter = folderFilter === f ? null : f)}
+          >
+            <Icon name="folder" size={13} />{f}
+            <span class="chip-count">{items.filter((i) => i.folder === f).length}</span>
+          </button>
+        {/each}
+      {/if}
     </div>
   {/if}
 
@@ -277,7 +319,8 @@
     {:else if filteredItems.length === 0}
       <div class="empty" style="height: 100%">
         <div class="empty-icon"><Icon name="folder" size={38} /></div>
-        <h3>Folder is empty</h3>
+        <h3>Nothing here</h3>
+        <p>No media matches this filter.</p>
       </div>
     {:else}
       <div class="grid">
@@ -310,7 +353,7 @@
               {/if}
             </div>
             <div class="body">
-              <span class="name" title={item.filename}>{item.label ?? item.filename}</span>
+              <span class="name" title={item.filename}>{item.title ?? item.filename}</span>
               <span class="meta">
                 {fmtSize(item.size)} ·
                 <span class="mono" title={item.sha256}>{item.sha256.slice(0, 8)}</span>
@@ -459,12 +502,12 @@
     <hr class="divider" />
 
     <!-- editable fields -->
-    <label class="field-label" for="edit-label">Label</label>
+    <label class="field-label" for="edit-title">Title</label>
     <input
-      id="edit-label"
+      id="edit-title"
       class="input"
       placeholder={editItem.filename}
-      bind:value={editLabel}
+      bind:value={editTitle}
     />
 
     <label class="field-label" for="edit-notes" style="margin-top: 12px;">Notes</label>
@@ -563,6 +606,13 @@
     font-size: var(--fs-xs);
     color: var(--text-3);
     margin-left: 2px;
+  }
+  .bar-sep {
+    width: 1px;
+    align-self: stretch;
+    margin: 2px 4px;
+    background: var(--border);
+    flex-shrink: 0;
   }
 
   .job {

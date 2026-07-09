@@ -23,6 +23,46 @@ def test_case_lifecycle(client):
     assert client.get("/api/cases/kharkiv-strike").status_code == 404
 
 
+def test_duplicate_name_rejected_case_insensitively(client):
+    client.post("/api/cases", json={"name": "Alpha Site"})
+
+    # a differently-cased name maps to the same case → 409
+    assert client.post("/api/cases", json={"name": "alpha site"}).status_code == 409
+    # a genuinely new name is fine
+    assert client.post("/api/cases", json={"name": "Beta Site"}).status_code == 200
+
+
+def test_rename_rejects_existing_name_but_allows_self(client):
+    a = client.post("/api/cases", json={"name": "One"}).json()
+    client.post("/api/cases", json={"name": "Two"})
+
+    # renaming onto another case's name (any casing) → 409
+    assert client.patch(f"/api/cases/{a['id']}", json={"name": "two"}).status_code == 409
+    # renaming to its own current name is allowed (no false positive)
+    assert client.patch(f"/api/cases/{a['id']}", json={"name": "One"}).status_code == 200
+
+
+def test_promote_rejects_existing_name(client):
+    client.post("/api/cases", json={"name": "Taken"})
+    scratch = client.post("/api/cases/scratch").json()
+    res = client.post(f"/api/cases/{scratch['id']}/promote", json={"name": "Taken"})
+    assert res.status_code == 409
+
+
+def test_delete_wipes_whole_case_folder(client):
+    import ozimut.config as cfg
+
+    cid = client.post("/api/cases", json={"name": "Doomed"}).json()["id"]
+    # plant content across subdirs so we can prove the whole tree is gone
+    _plant_capture(client, cid)
+    case_dir = cfg.cases_dir() / cid
+    assert case_dir.exists()
+
+    assert client.delete(f"/api/cases/{cid}").json()["status"] == "deleted"
+    assert not case_dir.exists()
+    assert client.get(f"/api/cases/{cid}").status_code == 404
+
+
 def test_scratch_promote(client):
     scratch = client.post("/api/cases/scratch").json()
     assert scratch["id"].startswith("scratch_")

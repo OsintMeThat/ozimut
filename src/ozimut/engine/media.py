@@ -272,7 +272,7 @@ def update_media(case: Case, rel_path: str, patch: dict[str, Any]) -> dict[str, 
         raise ValueError(f"no sidecar found for {rel_path!r}")
 
     data = json.loads(sidecar.read_text(encoding="utf-8"))
-    for key in ("notes", "folder", "label"):
+    for key in ("notes", "folder", "title"):
         if key in patch:
             val = patch[key]
             if val is None or val == "":
@@ -282,12 +282,12 @@ def update_media(case: Case, rel_path: str, patch: dict[str, Any]) -> dict[str, 
 
     _write_sidecar(media_path, data)
 
-    # mirror onto the media entity (label + folder/notes attrs)
+    # mirror onto the media entity (label mirrors the title; folder/notes attrs)
     entity = case.find_entity(attr="path", value=rel_path)
     if entity:
         entity_patch: dict[str, Any] = {}
-        if patch.get("label"):
-            entity_patch["label"] = patch["label"]
+        if patch.get("title"):
+            entity_patch["label"] = patch["title"]
         attrs: dict[str, Any] = {}
         if "folder" in patch:
             attrs["folder"] = patch["folder"] or ""

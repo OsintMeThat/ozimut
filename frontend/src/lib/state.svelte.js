@@ -113,6 +113,16 @@ export async function ensureCase() {
   return caseState.current;
 }
 
+/**
+ * Rename a case in place (keeps the same id/folder — only the display name
+ * changes). Refreshes the list, and the open case if it is the one renamed.
+ */
+export async function renameCase(id, name) {
+  await api.patch(`/api/cases/${id}`, { name });
+  await refreshCaseList();
+  if (caseState.current?.id === id) await openCase(id);
+}
+
 export async function promoteCase(name) {
   if (!caseState.current?.scratch) return;
   const promoted = await api.post(`/api/cases/${caseState.current.id}/promote`, { name });
@@ -124,4 +134,16 @@ export async function promoteCase(name) {
 export function closeCase() {
   caseState.current = null;
   rememberCase(null);
+}
+
+/**
+ * Permanently delete a case and everything it contains (the whole folder on
+ * disk — media, satellite, proofs, exports). Irreversible; the caller is
+ * responsible for the "type DELETE" confirmation. If the deleted case is the
+ * one open, we drop back to one-shot mode.
+ */
+export async function deleteCase(id) {
+  await api.del(`/api/cases/${id}`);
+  if (caseState.current?.id === id) closeCase();
+  await refreshCaseList();
 }

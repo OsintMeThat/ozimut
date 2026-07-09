@@ -139,11 +139,22 @@ def fetch_crop(
     height: int,
     provider: Provider,
     *,
-    crosshair: bool = True,
+    marker_style: str = "crosshair",
+    marker_x: int = 0,
+    marker_y: int = 0,
+    marker_lat: float | None = None,
+    marker_lon: float | None = None,
     bearing: float = 0.0,
     fetch_tile: Callable[[httpx.Client, str], Image.Image | None] | None = None,
 ) -> tuple[Image.Image, dict[str, Any]]:
-    """Stitch a width×height crop centered on (lat, lon). Returns (image, provenance).
+    """Stitch a width×height crop framed on (lat, lon). Returns (image, provenance).
+
+    ``lat``/``lon`` frame the crop (its center). The marker — the recorded point
+    of interest — defaults to that same center, but can be offset: ``marker_x``/
+    ``marker_y`` place it that many pixels from the crop center (WYSIWYG offset
+    computed on the client, already accounting for rotation), and ``marker_lat``/
+    ``marker_lon`` are its geographic coordinates, recorded as the capture's
+    ``lat``/``lon``. ``marker_style`` is ``"crosshair"``, ``"pin"`` or ``"none"``.
 
     Missing tiles become labeled gray placeholders instead of failing the crop.
     ``bearing`` (degrees clockwise from north) rotates the crop: a larger
@@ -216,15 +227,25 @@ def fetch_crop(
         off_x, off_y = (fetch_w - width) // 2, (fetch_h - height) // 2
         canvas = canvas.crop((off_x, off_y, off_x + width, off_y + height))
 
-    if crosshair:
-        _draw_crosshair(canvas)
+    marker_lat = lat if marker_lat is None else marker_lat
+    marker_lon = lon if marker_lon is None else marker_lon
+    mx = width // 2 + int(marker_x)
+    my = height // 2 + int(marker_y)
+    if marker_style == "pin":
+        _draw_pin(canvas, mx, my)
+    elif marker_style != "none":
+        marker_style = "crosshair"
+        _draw_crosshair(canvas, mx, my)
 
     provenance = {
         "provider": provider.id,
         "provider_label": provider.label,
         "attribution": provider.attribution,
-        "lat": lat,
-        "lon": lon,
+        # lat/lon are the marker (point of interest); center frames the crop
+        "lat": marker_lat,
+        "lon": marker_lon,
+        "center_lat": lat,
+        "center_lon": lon,
         "zoom": zoom,
         "width": width,
         "height": height,
@@ -233,15 +254,18 @@ def fetch_crop(
         "tiles": n_tiles,
         "tiles_missing": missing,
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "crosshair": crosshair,
+        "marker_style": marker_style,
+        "marker_x": int(marker_x),
+        "marker_y": int(marker_y),
+        # kept for backward-compatible readers of older captures
+        "crosshair": marker_style != "none",
     }
     return canvas, provenance
 
 
-def _draw_crosshair(img: Image.Image) -> None:
-    """Center marker: thin cross with an open middle, white with dark outline."""
+def _draw_crosshair(img: Image.Image, cx: int, cy: int) -> None:
+    """Marker at (cx, cy): thin cross with an open middle, white with dark outline."""
     draw = ImageDraw.Draw(img)
-    cx, cy = img.width // 2, img.height // 2
     arm, gap = 22, 7
     for dx, dy, colour in ((1, 1, (0, 0, 0)), (0, 0, (255, 255, 255))):
         for (x0, y0, x1, y1) in (
@@ -252,3 +276,45 @@ def _draw_crosshair(img: Image.Image) -> None:
         ):
             draw.line((x0 + dx, y0 + dy, x1 + dx, y1 + dy), fill=colour, width=2)
         draw.ellipse((cx - 2 + dx, cy - 2 + dy, cx + 2 + dx, cy + 2 + dy), outline=colour, width=1)
+
+
+def _draw_pin(img: Image.Image, x: int, y: int) -> None:
+    """Google-Maps-style teardrop pin whose tip points at (x, y).
+
+    Rendered on a transparent layer at 4× and downsampled, so the curved body
+    and its outline come out smooth instead of jagged (PIL has no anti-aliasing).
+    """
+    head_r, tip_len, stroke, pad = 12, 28, 1.6, 3
+    red, dark, white = (229, 72, 77, 255), (58, 12, 14, 255), (255, 255, 255, 255)
+
+    s = 4  # supersample factor
+    w = (head_r + pad) * 2
+    h = head_r + tip_len + pad * 2
+    layer = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+
+    cx = (head_r + pad) * s  # head center within the (supersampled) layer
+    cy = (head_r + pad) * s
+    tip_y = cy + tip_len * s
+
+    def body(radius: float, tip_offset: float, fill: tuple[int, int, int, int]) -> None:
+        # circle head at (cx, cy) unioned with a triangle down to the tip; the
+        # triangle sides are tangent to the circle, so the join is seamless
+        ty = tip_y - tip_offset
+        theta = math.asin(min(1.0, radius / (ty - cy)))
+        lx = cx - radius * math.cos(theta)
+        rx = cx + radius * math.cos(theta)
+        ly = cy + radius * math.sin(theta)
+        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=fill)
+        draw.polygon([(lx, ly), (cx, ty), (rx, ly)], fill=fill)
+
+    sw = stroke * s
+    body(head_r * s, 0, dark)  # dark silhouette = the outline
+    body(head_r * s - sw, sw * 1.7, red)  # red body inset by the stroke width
+    hole = 4.4 * s  # inner white dot with a thin dark ring
+    draw.ellipse((cx - hole - sw * 0.6, cy - hole - sw * 0.6,
+                  cx + hole + sw * 0.6, cy + hole + sw * 0.6), fill=dark)
+    draw.ellipse((cx - hole, cy - hole, cx + hole, cy + hole), fill=white)
+
+    layer = layer.resize((w, h), Image.Resampling.LANCZOS)
+    img.paste(layer, (round(x - (head_r + pad)), round(y - (head_r + pad + tip_len))), layer)

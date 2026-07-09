@@ -27,7 +27,7 @@ class UpdateIn(BaseModel):
     path: str
     notes: str | None = None
     folder: str | None = None
-    label: str | None = None
+    title: str | None = None
 
 
 @router.get("/cases/{case_id}/media")
@@ -93,8 +93,8 @@ def update_media_item(case_id: str, body: UpdateIn) -> dict[str, Any]:
         patch["notes"] = body.notes
     if body.folder is not None:
         patch["folder"] = body.folder
-    if body.label is not None:
-        patch["label"] = body.label
+    if body.title is not None:
+        patch["title"] = body.title
     try:
         return media_engine.update_media(case, body.path, patch)
     except (ValueError, CaseError) as exc:
