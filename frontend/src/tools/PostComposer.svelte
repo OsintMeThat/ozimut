@@ -15,6 +15,7 @@
   let mention = $state('@GeoConfirmed');
   let source = $state('');
   let proofPng = $state(null);
+  let proofVer = $state(0); // cache-buster: bumped whenever proofPng is (re)assigned
   let tweet1 = $state('');
   let tweet1Edited = $state(false);
 
@@ -36,6 +37,10 @@
   let pickerOpen = $state(false);
   let mediaLibrary = $state([]);
 
+  // Proof picker modal
+  let proofPickerOpen = $state(false);
+  let proofLibrary = $state([]);
+
   // Ingest a proof handed over by the Proof Composer
   $effect(() => {
     const p = uiState.postProof;
@@ -43,7 +48,7 @@
     uiState.postProof = null;
     description = p.title === 'Untitled proof' ? '' : (p.title ?? '');
     source = p.sources?.[0] ?? '';
-    proofPng = p.png ?? null;
+    setProof(p.png ?? null);
     tweet1Edited = false;
     if (p.coords) {
       coordsText = `${p.coords.lat.toFixed(6)}, ${p.coords.lon.toFixed(6)}`;
@@ -201,12 +206,50 @@
     mediaPath = null;
   }
 
+  // ---- proof picker -------------------------------------------------------
+
+  /** Assign the attached proof and bump the cache-buster so the preview always
+   *  reflects the current file — proofs default to the same slug/filename, so
+   *  the URL alone can be identical across different proofs. */
+  function setProof(png) {
+    proofPng = png;
+    proofVer = png ? Date.now() : 0;
+  }
+
+  async function openProofPicker() {
+    if (!caseState.current) {
+      toast('Open a case to pick a proof', 'warn');
+      return;
+    }
+    try {
+      proofLibrary = await api.get(`/api/cases/${caseState.current.id}/proofs`);
+      proofPickerOpen = true;
+    } catch (e) {
+      toast(e.message, 'danger');
+    }
+  }
+
+  function pickProof(item) {
+    setProof(item.png);
+    if (!description.trim() && item.title && item.title !== 'Untitled proof') {
+      description = item.title;
+      regenerate();
+    }
+    proofPickerOpen = false;
+  }
+
+  function clearProof() {
+    setProof(null);
+  }
+
   const mediaHref = $derived(
     mediaPath && caseState.current ? `/files/${caseState.current.id}/${mediaPath}` : null
   );
 
   const proofHref = $derived(
-    proofPng && caseState.current ? `/files/${caseState.current.id}/${proofPng}` : null
+    proofPng && caseState.current
+      ? `/files/${caseState.current.id}/${proofPng}${proofVer ? `?v=${proofVer}` : ''}`
+      : null
   );
 
   // ---- one-click image copy / media download ------------------------------
@@ -311,7 +354,7 @@
       place = s.place ?? '';
       mention = s.mention ?? '@GeoConfirmed';
       source = s.source ?? '';
-      proofPng = s.proofPng ?? null;
+      setProof(s.proofPng ?? null);
       mediaEnabled = s.mediaEnabled ?? true;
       mediaType = s.mediaType ?? 'none';
       mediaText = s.mediaText ?? '';
@@ -443,17 +486,31 @@
           />
         </div>
 
-        {#if proofPng && caseState.current}
+        {#if caseState.current}
           <div class="field">
             <div class="proof-head">
               <span class="label" style="margin:0">Attached proof</span>
-              <button class="btn btn-ghost btn-sm" onclick={() => copyImage(proofHref)} title="Copy the image — paste it into X">
-                <Icon name="copy" size={13} /> Copy image
-              </button>
+              {#if proofPng}
+                <button class="btn btn-ghost btn-sm" onclick={() => copyImage(proofHref)} title="Copy the image — paste it into X">
+                  <Icon name="copy" size={13} /> Copy image
+                </button>
+                <button class="btn btn-ghost btn-sm" onclick={openProofPicker} title="Attach a different proof">
+                  <Icon name="proof" size={13} /> Change
+                </button>
+                <button class="btn btn-ghost btn-sm danger-hover" onclick={clearProof} title="Detach proof">
+                  <Icon name="x" size={13} />
+                </button>
+              {/if}
             </div>
-            <a href={proofHref} target="_blank" rel="noreferrer">
-              <img class="proof-preview card" src={proofHref} alt="proof" />
-            </a>
+            {#if proofPng}
+              <a href={proofHref} target="_blank" rel="noreferrer">
+                <img class="proof-preview card" src={proofHref} alt="proof" />
+              </a>
+            {:else}
+              <button class="btn btn-ghost btn-sm proof-attach" onclick={openProofPicker}>
+                <Icon name="proof" size={14} /> Attach a proof
+              </button>
+            {/if}
           </div>
         {/if}
       </div>
@@ -624,6 +681,29 @@
   </Modal>
 {/if}
 
+{#if proofPickerOpen}
+  <Modal title="Attach a proof" width="640px" onclose={() => (proofPickerOpen = false)}>
+    {#if proofLibrary.length === 0}
+      <p class="picker-empty">No proofs in this case yet — build one in the Proof tab.</p>
+    {:else}
+      <div class="picker-grid">
+        {#each proofLibrary as item (item.name)}
+          <button class="picker-item" onclick={() => pickProof(item)} title={item.title} disabled={!item.png}>
+            <div class="picker-thumb">
+              {#if item.png}
+                <img src={`/files/${caseState.current.id}/${item.png}`} alt={item.title} />
+              {:else}
+                <Icon name="proof" size={24} />
+              {/if}
+            </div>
+            <span class="picker-name">{item.title || item.name}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </Modal>
+{/if}
+
 <style>
   .layout {
     display: grid;
@@ -678,6 +758,10 @@
     align-items: center;
     gap: 10px;
     margin-bottom: 6px;
+  }
+  .proof-attach {
+    align-self: flex-start;
+    border: 1px dashed var(--border);
   }
 
   /* Thread / tweet blocks */
