@@ -1,14 +1,19 @@
 <script>
   import { api } from '../../lib/api.js';
-  import { caseState, uiState, reloadCase, toast } from '../../lib/state.svelte.js';
+  import { caseState, toast } from '../../lib/state.svelte.js';
+  import { isNeutral } from '../../lib/inspect.js';
   import Icon from '../../components/Icon.svelte';
+  import AdjustSliders from './AdjustSliders.svelte';
 
-  // Extracts frames from a video into the case (spec v2 gesture).
-  let { source, probeInfo, shared, onProduced } = $props();
+  // Right-panel menu for the Selection tab: scrub the video, capture frames into
+  // the transient tray (nothing is filed here), and tune video-level adjustments
+  // via the gear — those feed the optional "enhanced video" saved in the Save tab.
+  let { probeInfo, shared, videoFilters, session, capture } = $props();
 
   let suggestions = $state([]);
   let scanning = $state(false);
   let capturing = $state(false);
+  let showGear = $state(false);
 
   const duration = $derived(probeInfo?.duration ?? 0);
 
@@ -23,21 +28,10 @@
     shared.seekTo = t;
   }
 
-  async function capture(time = shared.currentTime ?? 0) {
+  async function grab(time = shared.currentTime ?? 0) {
     capturing = true;
     try {
-      const res = await api.post(`/api/cases/${caseState.current.id}/inspect/frame`, {
-        path: source.path,
-        time,
-      });
-      await reloadCase();
-      onProduced(res);
-      toast(
-        res.duplicate ? 'That frame is already in the case' : `Frame captured at ${fmt(time)}`,
-        res.duplicate ? 'warn' : 'ok'
-      );
-    } catch (e) {
-      toast(e.message, 'danger');
+      await capture(time);
     } finally {
       capturing = false;
     }
@@ -48,11 +42,10 @@
     suggestions = [];
     try {
       const { job_id } = await api.post(`/api/cases/${caseState.current.id}/inspect/suggest`, {
-        path: source.path,
+        path: session.source.path,
         bins: 12,
       });
-      const frames = await poll(job_id);
-      suggestions = frames;
+      suggestions = await poll(job_id);
     } catch (e) {
       toast(e.message, 'danger');
     } finally {
@@ -70,6 +63,7 @@
   }
 
   const maxScore = $derived(Math.max(1, ...suggestions.map((s) => s.score)));
+  const gearActive = $derived(!isNeutral(videoFilters, session.videoAdjust));
 </script>
 
 <div class="module">
@@ -85,9 +79,24 @@
     <button class="btn btn-sm" onclick={() => step(1)} title="Forward 1s">+1s</button>
   </div>
 
-  <button class="btn btn-primary w-full" disabled={capturing} onclick={() => capture()}>
-    <Icon name="image" size={15} /> Capture this frame
+  <button class="btn btn-primary w-full" disabled={capturing} onclick={() => grab()}>
+    <Icon name="image" size={15} /> Capture frame to tray
   </button>
+  <p class="hint tray-note">
+    <Icon name="layers" size={12} /> {session.frames.length} frame{session.frames.length === 1 ? '' : 's'}
+    in tray — nothing is saved until the Save tab.
+  </p>
+
+  <div class="section">
+    <button class="section-head as-btn" onclick={() => (showGear = !showGear)}>
+      <span><Icon name="settings" size={14} /> Video adjustments {#if gearActive}<span class="dot"></span>{/if}</span>
+      <Icon name={showGear ? 'chevronDown' : 'chevronRight'} size={14} />
+    </button>
+    {#if showGear}
+      <p class="hint">Preview the whole clip brighter/clearer; save an enhanced copy in Save.</p>
+      <AdjustSliders filters={videoFilters} values={session.videoAdjust} />
+    {/if}
+  </div>
 
   <div class="section">
     <div class="section-head">
@@ -98,7 +107,6 @@
       </button>
     </div>
     <p class="hint">Samples the clip and ranks frames by focus — sharper is higher.</p>
-
     {#each suggestions as s (s.time)}
       <div class="sugg" class:top={s.rank === 0}>
         <span class="mono">{fmt(s.time)}</span>
@@ -106,7 +114,7 @@
         <button class="btn btn-ghost btn-xs" onclick={() => (shared.seekTo = s.time)} title="Seek here">
           <Icon name="eye" size={13} />
         </button>
-        <button class="btn btn-xs" disabled={capturing} onclick={() => capture(s.time)} title="Capture">
+        <button class="btn btn-xs" disabled={capturing} onclick={() => grab(s.time)} title="Capture">
           <Icon name="image" size={13} />
         </button>
       </div>
@@ -143,12 +151,18 @@
     width: 100%;
     justify-content: center;
   }
+  .tray-note {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: -4px 0 0;
+  }
   .section {
     border-top: 1px solid var(--border);
     padding-top: 12px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
   .section-head {
     display: flex;
@@ -157,10 +171,27 @@
     font-weight: 600;
     font-size: var(--fs-sm);
   }
+  .section-head span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .as-btn {
+    width: 100%;
+    background: none;
+    color: var(--text-1);
+    text-align: left;
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
   .hint {
     color: var(--text-3);
     font-size: var(--fs-xs);
-    margin: 0 0 4px;
+    margin: 0;
   }
   .sugg {
     display: flex;

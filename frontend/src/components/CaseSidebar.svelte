@@ -3,6 +3,7 @@
   import { caseState, uiState, reloadCase, toast } from '../lib/state.svelte.js';
   import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
+  import ConfirmDialog from './ConfirmDialog.svelte';
 
   const ENTITY_ICONS = {
     person: 'user',
@@ -20,17 +21,23 @@
     ip: 'hash',
     vehicle: 'grip',
     note: 'note',
+    'inspect-session': 'inspect',
   };
 
   // Tool to open when clicking a given entity type
-  const ENTITY_TOOL = { media: 'media', proof: 'proof', place: 'satellite', post: 'post' };
+  const ENTITY_TOOL = {
+    media: 'media', proof: 'proof', place: 'satellite', post: 'post', 'inspect-session': 'inspect',
+  };
+
+  // Entity types backed by a file on disk — deleting them everywhere drops the file.
+  const FILE_BACKED = new Set(['media', 'place', 'proof', 'post', 'inspect-session']);
 
   // ── case notes (single notes.md) ─────────────────────────────────────────
   let caseNotes = $state('');
   let caseNotesLoadedFor = $state(null);
   let saveTimer;
   let saved = $state(true);
-  let section = $state({ notes: false, folders: true, entities: true });
+  let section = $state({ notes: false, saved: true, mywork: true });
 
   $effect(() => {
     const id = caseState.current?.id;
@@ -59,6 +66,12 @@
   }
 
   // ── entities ─────────────────────────────────────────────────────────────
+  const entities = $derived(caseState.current?.entities ?? []);
+  const suggested = $derived(entities.filter((e) => e.provenance?.status === 'suggested'));
+  const confirmed = $derived(entities.filter((e) => e.provenance?.status !== 'suggested'));
+
+  const folderOf = (e) => e.attrs?.folder || null;
+
   async function confirmEntity(entity) {
     await api.patch(`/api/cases/${caseState.current.id}/entities/${entity.id}`, {
       status: 'confirmed',
@@ -66,11 +79,11 @@
     await reloadCase();
   }
 
-  async function removeEntity(entity) {
-    if (!confirm(`Delete "${entity.label}"?`)) return;
+  // Dismiss a suggestion outright (quick triage — no heavy confirmation).
+  async function dismissSuggestion(entity) {
     await api.del(`/api/cases/${caseState.current.id}/entities/${entity.id}`);
     await reloadCase();
-    toast(`Removed "${entity.label}"`, 'info');
+    toast(`Dismissed "${entity.label}"`, 'info');
   }
 
   function openEntity(entity) {
@@ -90,12 +103,25 @@
       uiState.tool = 'post';
       return;
     }
+    if (entity.type === 'inspect-session') {
+      // reopen the whole Inspect workspace (frames, adjustments, collage)
+      const spec = entity.attrs?.spec ?? '';
+      const name = spec.replace(/^inspect\//, '').replace(/\.json$/, '');
+      if (name) uiState.openInspect = name;
+      uiState.tool = 'inspect';
+      return;
+    }
     if (entity.type === 'place') {
-      // fly the Satellite map to the point, then switch tab
+      // fly the Satellite map to the point at the capture's own zoom/bearing
       const lat = Number(entity.attrs?.lat);
       const lon = Number(entity.attrs?.lon);
       if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        uiState.gotoCoords = { lat, lon };
+        uiState.gotoCoords = {
+          lat,
+          lon,
+          zoom: Number(entity.attrs?.zoom),
+          bearing: Number(entity.attrs?.bearing),
+        };
       }
       uiState.tool = 'satellite';
       return;
@@ -104,94 +130,130 @@
     if (tool) uiState.tool = tool;
   }
 
-  const entities = $derived(caseState.current?.entities ?? []);
-  const suggested = $derived(entities.filter((e) => e.provenance?.status === 'suggested'));
-  const confirmed = $derived(entities.filter((e) => e.provenance?.status !== 'suggested'));
+  // ── Saved work: every artifact, grouped by the tool that produced it ──────
+  // The grouping is derived from provenance.by — the honest record of origin —
+  // so it fills itself as you work and needs no manual upkeep.
+  const TOOL_GROUPS = [
+    ['media-library', 'Media Library', 'image'],
+    ['inspect', 'Inspect', 'inspect'],
+    ['satellite', 'Satellite', 'satellite'],
+    ['proof-composer', 'Proof Composer', 'proof'],
+    ['post-composer', 'Post Composer', 'post'],
+    ['user', 'Notes & manual', 'note'],
+  ];
+  const KNOWN_TOOLS = new Set(TOOL_GROUPS.map(([k]) => k).filter((k) => k !== 'user'));
+  const groupKey = (by) => (KNOWN_TOOLS.has(by) ? by : 'user');
 
-  const folderOf = (e) => e.attrs?.folder || null;
+  const savedGroups = $derived.by(() => {
+    const buckets = new Map(TOOL_GROUPS.map(([k]) => [k, []]));
+    for (const e of confirmed) buckets.get(groupKey(e.provenance?.by)).push(e);
+    return TOOL_GROUPS.map(([key, label, icon]) => ({
+      key,
+      label,
+      icon,
+      items: buckets.get(key),
+    })).filter((g) => g.items.length > 0);
+  });
 
-  // ── folders (managed here, drag & drop assignment) ────────────────────────
-  let folderFilter = $state(null); // null = all, '' = unfiled sentinel
-  let newFolder = $state('');
+  let groupOpen = $state({}); // group key -> bool (absent = open)
+  const isGroupOpen = (k) => groupOpen[k] !== false;
+  const toggleGroup = (k) => (groupOpen[k] = !isGroupOpen(k));
+
+  // ── My work: the analyst's own nested folder tree ('/'-separated paths) ────
+  let newFolder = $state(''); // top-level create input
+  let addingUnder = $state(undefined); // folder path currently gaining a child
+  let newSubName = $state('');
+  let expanded = $state({}); // path -> bool (absent = expanded)
   let dragEntityId = $state(null);
-  let dragOverFolder = $state(undefined); // folder name or '' (unfiled) being hovered
+  let dragOverFolder = $state(undefined); // folder path being hovered
 
-  // known folders = persisted case folders ∪ folders in use on entities
   const caseFolders = $derived(caseState.current?.folders ?? []);
-  const usedFolders = $derived(
-    [...new Set(entities.map(folderOf).filter(Boolean))]
-  );
-  const allFolders = $derived(
-    [...new Set([...caseFolders, ...usedFolders])].sort((a, b) =>
-      a.toLowerCase().localeCompare(b.toLowerCase())
-    )
-  );
+  const filedCount = $derived(confirmed.filter((e) => folderOf(e)).length);
 
-  const filteredConfirmed = $derived(
-    folderFilter === null
-      ? confirmed
-      : confirmed.filter((e) => (folderOf(e) ?? '') === folderFilter)
-  );
-  const filteredSuggested = $derived(
-    folderFilter === null || folderFilter === ''
-      ? suggested
-      : []
-  );
-
-  function countInFolder(f) {
-    return entities.filter((e) => (folderOf(e) ?? '') === f).length;
+  // Build a nested tree from flat '/'-separated folder paths + filed entities.
+  // Entities with no folder live only in Saved work, so they are ignored here.
+  function buildTree(folders, items) {
+    const root = { name: '', path: '', children: new Map(), entities: [] };
+    const ensure = (path) => {
+      let node = root, acc = '';
+      for (const seg of path.split('/')) {
+        acc = acc ? `${acc}/${seg}` : seg;
+        if (!node.children.has(seg))
+          node.children.set(seg, { name: seg, path: acc, children: new Map(), entities: [] });
+        node = node.children.get(seg);
+      }
+      return node;
+    };
+    for (const f of folders) if (f) ensure(f);
+    for (const e of items) {
+      const f = folderOf(e);
+      if (f) ensure(f).entities.push(e);
+    }
+    const sortNodes = (map) =>
+      [...map.values()]
+        .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+        .map((n) => ({ ...n, children: sortNodes(n.children) }));
+    return sortNodes(root.children);
   }
 
-  async function createFolder() {
-    const name = newFolder.trim();
+  const tree = $derived(buildTree(caseFolders, confirmed));
+  const allFolders = $derived(
+    (function flatten(nodes) {
+      return nodes.flatMap((n) => [n.path, ...flatten(n.children)]);
+    })(tree)
+  );
+
+  function subtreeCount(node) {
+    return node.entities.length + node.children.reduce((s, c) => s + subtreeCount(c), 0);
+  }
+
+  const isExpanded = (path) => expanded[path] !== false;
+  function toggle(path) { expanded[path] = !isExpanded(path); }
+  function focus(node) { node.focus(); }
+
+  async function createFolder(fullName) {
+    const name = (fullName ?? newFolder).trim();
     if (!name) return;
-    newFolder = '';
+    if (fullName == null) newFolder = '';
     try {
       await api.post(`/api/cases/${caseState.current.id}/folders`, { name });
+      let acc = '';
+      for (const seg of name.split('/')) { acc = acc ? `${acc}/${seg}` : seg; expanded[acc] = true; }
       await reloadCase();
-      folderFilter = name;
     } catch (e) {
       toast(e.message, 'danger');
     }
   }
 
+  function startAddSub(path) {
+    addingUnder = path;
+    newSubName = '';
+    expanded[path] = true;
+  }
+  async function submitAddSub() {
+    const name = newSubName.trim();
+    const parent = addingUnder;
+    addingUnder = undefined;
+    newSubName = '';
+    if (!name || parent === undefined) return;
+    await createFolder(parent ? `${parent}/${name}` : name);
+  }
+
+  // File (or unfile, with folder='') an entity into a My-work folder. Media
+  // keeps its sidecar in sync via its own endpoint.
   async function assignFolder(entity, folder) {
     const val = folder || '';
-    try {
-      if (entity.type === 'media' && entity.attrs?.path) {
-        await api.patch(`/api/cases/${caseState.current.id}/media`, {
-          path: entity.attrs.path,
-          folder: val,
-        });
-      } else {
-        await api.patch(`/api/cases/${caseState.current.id}/entities/${entity.id}`, {
-          attrs: { folder: val },
-        });
-      }
-      await reloadCase();
-    } catch (e) {
-      toast(e.message, 'danger');
+    if (entity.type === 'media' && entity.attrs?.path) {
+      await api.patch(`/api/cases/${caseState.current.id}/media`, {
+        path: entity.attrs.path,
+        folder: val,
+      });
+    } else {
+      await api.patch(`/api/cases/${caseState.current.id}/entities/${entity.id}`, {
+        attrs: { folder: val },
+      });
     }
-  }
-
-  async function deleteFolder(f) {
-    if (!confirm(`Delete folder "${f}"? Items inside become unfiled.`)) return;
-    const inside = entities.filter((e) => folderOf(e) === f);
-    for (const e of inside) {
-      // clear each entity's folder (keeps media sidecars in sync)
-      if (e.type === 'media' && e.attrs?.path) {
-        await api.patch(`/api/cases/${caseState.current.id}/media`, {
-          path: e.attrs.path, folder: '',
-        });
-      } else {
-        await api.patch(`/api/cases/${caseState.current.id}/entities/${e.id}`, {
-          attrs: { folder: '' },
-        });
-      }
-    }
-    await api.del(`/api/cases/${caseState.current.id}/folders?name=${encodeURIComponent(f)}`);
     await reloadCase();
-    if (folderFilter === f) folderFilter = null;
   }
 
   // drag & drop wiring
@@ -205,7 +267,85 @@
     dragOverFolder = undefined;
     const entity = entities.find((e) => e.id === dragEntityId);
     dragEntityId = null;
-    if (entity) assignFolder(entity, folder);
+    if (entity) assignFolder(entity, folder).catch((e) => toast(e.message, 'danger'));
+  }
+
+  // ── confirmation dialog (replaces browser confirm()) ──────────────────────
+  let confirmState = $state(null); // { title, message, detail, confirmLabel, tone, icon, action }
+  let confirmBusy = $state(false);
+
+  async function runConfirm() {
+    const s = confirmState;
+    if (!s) return;
+    confirmBusy = true;
+    try {
+      await s.action();
+    } catch (e) {
+      toast(e.message, 'danger');
+    } finally {
+      confirmBusy = false;
+      confirmState = null;
+    }
+  }
+
+  // Delete everywhere: removes the entity and its underlying file(s). Used from
+  // Saved work (and the note modal) — irreversible, danger tone.
+  function askDeleteEverywhere(entity, onDone) {
+    confirmState = {
+      title: 'Delete everywhere?',
+      message: `“${entity.label}” will be removed from Saved work and My work.`,
+      detail: FILE_BACKED.has(entity.type)
+        ? 'This permanently deletes the underlying file(s) on disk — it cannot be undone.'
+        : 'This permanently removes it from the case — it cannot be undone.',
+      confirmLabel: 'Delete everywhere',
+      tone: 'danger',
+      icon: 'trash',
+      action: async () => {
+        await api.del(`/api/cases/${caseState.current.id}/entities/${entity.id}`);
+        await reloadCase();
+        toast(`Deleted "${entity.label}"`, 'info');
+        onDone?.();
+      },
+    };
+  }
+
+  // Remove from My work: just clears the filing. The item stays in Saved work.
+  function askRemoveFromMyWork(entity) {
+    confirmState = {
+      title: 'Remove from My work?',
+      message: `“${entity.label}” goes back to Saved work — nothing is deleted.`,
+      detail: 'It stays available under its tool in Saved work. Only your filing here is cleared.',
+      confirmLabel: 'Remove from My work',
+      tone: 'default',
+      icon: 'folderMinus',
+      action: () => assignFolder(entity, ''),
+    };
+  }
+
+  function askDeleteFolder(path) {
+    const prefix = path + '/';
+    const inside = entities.filter((e) => {
+      const f = folderOf(e);
+      return f === path || (f && f.startsWith(prefix));
+    });
+    const subs = allFolders.filter((f) => f.startsWith(prefix)).length;
+    confirmState = {
+      title: 'Remove this folder?',
+      message: subs
+        ? `“${path}” and its ${subs} subfolder(s) will be removed from My work.`
+        : `“${path}” will be removed from My work.`,
+      detail: 'Items inside go back to Saved work — no files are deleted.',
+      confirmLabel: 'Remove folder',
+      tone: 'default',
+      icon: 'folderMinus',
+      action: async () => {
+        for (const e of inside) await assignFolder(e, '');
+        await api.del(
+          `/api/cases/${caseState.current.id}/folders?name=${encodeURIComponent(path)}`
+        );
+        await reloadCase();
+      },
+    };
   }
 
   // ── entity info modal (media details) ─────────────────────────────────────
@@ -243,7 +383,7 @@
   let noteModalSaving = $state(false);
 
   function openNewNote() {
-    noteModal = { entity: null, title: '', folder: folderFilter || '', content: '' };
+    noteModal = { entity: null, title: '', folder: '', content: '' };
   }
 
   function openEditNote(entity) {
@@ -302,7 +442,7 @@
 
     <div class="sections">
 
-      <!-- Case Notes (single notes.md) -->
+      <!-- 1 · Case Notes (single notes.md) -->
       <button class="section-head" onclick={() => (section.notes = !section.notes)}>
         <Icon name={section.notes ? 'chevronDown' : 'chevronRight'} size={13} />
         <span>Case Notes</span>
@@ -317,104 +457,23 @@
         ></textarea>
       {/if}
 
-      <!-- Folders -->
-      <button class="section-head" onclick={() => (section.folders = !section.folders)}>
-        <Icon name={section.folders ? 'chevronDown' : 'chevronRight'} size={13} />
-        <span>Folders</span>
-        <span class="count">{allFolders.length}</span>
-      </button>
-      {#if section.folders}
-        <form class="new-folder" onsubmit={(e) => { e.preventDefault(); createFolder(); }}>
-          <input class="input" placeholder="New folder…" bind:value={newFolder} />
-          <button class="btn btn-sm" type="submit" title="Create folder" disabled={!newFolder.trim()}>
-            <Icon name="plus" size={13} />
-          </button>
-        </form>
-
-        <div class="folder-list">
-          <!-- All -->
-          <button
-            class="frow"
-            class:active={folderFilter === null}
-            class:dropping={dragOverFolder === 'ALL_SENTINEL'}
-            onclick={() => (folderFilter = null)}
-          >
-            <Icon name="layers" size={13} />
-            <span class="fname">All items</span>
-            <span class="fcount">{entities.length}</span>
-          </button>
-
-          <!-- Unfiled (drop target to clear folder) -->
-          <button
-            class="frow"
-            class:active={folderFilter === ''}
-            class:dropping={dragOverFolder === ''}
-            ondragover={(e) => { e.preventDefault(); dragOverFolder = ''; }}
-            ondragleave={() => (dragOverFolder = undefined)}
-            ondrop={(e) => onDropFolder(e, '')}
-            onclick={() => (folderFilter = '')}
-          >
-            <Icon name="folder" size={13} />
-            <span class="fname">Unfiled</span>
-            <span class="fcount">{countInFolder('')}</span>
-          </button>
-
-          {#each allFolders as f (f)}
-            <button
-              class="frow"
-              class:active={folderFilter === f}
-              class:dropping={dragOverFolder === f}
-              ondragover={(e) => { e.preventDefault(); dragOverFolder = f; }}
-              ondragleave={() => (dragOverFolder = undefined)}
-              ondrop={(e) => onDropFolder(e, f)}
-              onclick={() => (folderFilter = f)}
-            >
-              <Icon name="folderOpen" size={13} />
-              <span class="fname">{f}</span>
-              <span class="fcount">{countInFolder(f)}</span>
-              <span
-                class="fdel"
-                role="button"
-                tabindex="0"
-                title="Delete folder"
-                onclick={(e) => { e.stopPropagation(); deleteFolder(f); }}
-                onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), deleteFolder(f))}
-              >
-                <Icon name="trash" size={12} />
-              </span>
-            </button>
-          {/each}
-        </div>
-        <div class="hint">Drag an entity onto a folder to file it.</div>
-      {/if}
-
-      <!-- Entities -->
+      <!-- 2 · Saved work (auto — grouped by the tool that produced each item) -->
       <div class="section-head-row">
-        <button class="section-head" onclick={() => (section.entities = !section.entities)}>
-          <Icon name={section.entities ? 'chevronDown' : 'chevronRight'} size={13} />
-          <span>Entities</span>
-          <span class="count">{entities.length}</span>
+        <button class="section-head" onclick={() => (section.saved = !section.saved)}>
+          <Icon name={section.saved ? 'chevronDown' : 'chevronRight'} size={13} />
+          <span>Saved work</span>
+          <span class="count">{confirmed.length}</span>
         </button>
         <button class="btn btn-ghost btn-sm new-note-btn" title="New note" onclick={openNewNote}>
           <Icon name="plus" size={13} /><Icon name="note" size={13} />
         </button>
       </div>
 
-      {#if section.entities}
-        {#if folderFilter !== null}
-          <div class="active-folder">
-            <Icon name={folderFilter === '' ? 'folder' : 'folderOpen'} size={12} />
-            <span>{folderFilter === '' ? 'Unfiled' : folderFilter}</span>
-            <button class="clear-filter" onclick={() => (folderFilter = null)} title="Clear filter">
-              <Icon name="x" size={12} />
-            </button>
-          </div>
-        {/if}
-
-        <!-- suggested entities -->
-        {#if filteredSuggested.length > 0}
+      {#if section.saved}
+        <!-- suggested entities (pinned — confirm or dismiss) -->
+        {#if suggested.length > 0}
           <div class="suggest-note">Suggested — confirm or dismiss:</div>
-          {#each filteredSuggested as e (e.id)}
+          {#each suggested as e (e.id)}
             <div class="entity suggested">
               <Icon name={ENTITY_ICONS[e.type] ?? 'note'} size={14} />
               <div class="e-body">
@@ -424,65 +483,185 @@
               <button class="btn btn-ghost btn-sm" title="Confirm" onclick={() => confirmEntity(e)}>
                 <Icon name="check" size={13} />
               </button>
-              <button class="btn btn-ghost btn-sm" title="Dismiss" onclick={() => removeEntity(e)}>
+              <button class="btn btn-ghost btn-sm" title="Dismiss" onclick={() => dismissSuggestion(e)}>
                 <Icon name="x" size={13} />
               </button>
             </div>
           {/each}
         {/if}
 
-        <!-- confirmed entities -->
-        {#each filteredConfirmed as e (e.id)}
-          {@const isClickable = e.type === 'note' || !!ENTITY_TOOL[e.type]}
-          <div
-            class="entity"
-            class:clickable={isClickable}
-            class:dragging={dragEntityId === e.id}
-            draggable="true"
-            ondragstart={(ev) => onDragStart(ev, e)}
-            ondragend={() => { dragEntityId = null; dragOverFolder = undefined; }}
-            onclick={() => (e.type === 'note' ? openEditNote(e) : openEntity(e))}
-            role={isClickable ? 'button' : undefined}
-            tabindex={isClickable ? 0 : undefined}
-            onkeydown={(ev) => ev.key === 'Enter' && (e.type === 'note' ? openEditNote(e) : openEntity(e))}
-          >
-            <Icon name="grip" size={13} />
-            <Icon name={ENTITY_ICONS[e.type] ?? 'note'} size={14} />
-            <div class="e-body">
-              <span class="e-label">{e.label}</span>
-              <span class="e-meta">
-                {e.type}
-                {#if folderOf(e)}· <Icon name="folder" size={10} />{folderOf(e)}{/if}
-              </span>
-            </div>
-            <button
-              class="btn btn-ghost btn-sm act"
-              title="Info"
-              onclick={(ev) => { ev.stopPropagation(); openInfo(e); }}
-            >
-              <Icon name="note" size={13} />
+        <div class="tree">
+          {#each savedGroups as g (g.key)}
+            <button class="grow" onclick={() => toggleGroup(g.key)}>
+              <Icon name={isGroupOpen(g.key) ? 'chevronDown' : 'chevronRight'} size={12} />
+              <Icon name={g.icon} size={13} />
+              <span class="fname">{g.label}</span>
+              <span class="fcount">{g.items.length}</span>
             </button>
-            <button
-              class="btn btn-ghost btn-sm act del"
-              title="Delete"
-              onclick={(ev) => { ev.stopPropagation(); removeEntity(e); }}
-            >
-              <Icon name="trash" size={13} />
-            </button>
-          </div>
-        {:else}
-          {#if !filteredSuggested.length}
-            <div class="none">
-              {folderFilter !== null ? 'No items in this folder.' : 'Tools file entities here as you work.'}
-            </div>
+            {#if isGroupOpen(g.key)}
+              {#each g.items as e (e.id)}
+                {@render entityRow(e, 1, 'saved')}
+              {/each}
+            {/if}
+          {/each}
+
+          {#if savedGroups.length === 0 && suggested.length === 0}
+            <div class="none">Tools file what you save here as you work.</div>
           {/if}
-        {/each}
+        </div>
       {/if}
 
+      <!-- 3 · My work (manual — your own folders, filled by drag & drop) -->
+      <button class="section-head" onclick={() => (section.mywork = !section.mywork)}>
+        <Icon name={section.mywork ? 'chevronDown' : 'chevronRight'} size={13} />
+        <span>My work</span>
+        <span class="count">{filedCount}</span>
+      </button>
+
+      {#if section.mywork}
+        <!-- create a top-level folder -->
+        <form class="new-folder" onsubmit={(e) => { e.preventDefault(); createFolder(); }}>
+          <input class="input" placeholder="New folder…" bind:value={newFolder} />
+          <button class="btn btn-sm" type="submit" title="Create folder" disabled={!newFolder.trim()}>
+            <Icon name="plus" size={13} />
+          </button>
+        </form>
+
+        <div class="tree">
+          {#each tree as node (node.path)}
+            {@render folderNode(node, 0)}
+          {/each}
+
+          {#if tree.length === 0}
+            <div class="none">
+              Create a folder, then drag items from Saved work here to organize your investigation.
+            </div>
+          {/if}
+        </div>
+        {#if tree.length > 0}
+          <div class="hint">Drag an item from Saved work onto a folder to file it here.</div>
+        {/if}
+      {/if}
 
     </div>
   {/if}
 </aside>
+
+<!-- one folder node + its subtree (recursive) -->
+{#snippet folderNode(node, depth)}
+  <div
+    class="frow"
+    class:dropping={dragOverFolder === node.path}
+    style="padding-left: {8 + depth * 14}px"
+    role="button"
+    tabindex="0"
+    ondragover={(e) => { e.preventDefault(); dragOverFolder = node.path; }}
+    ondragleave={() => (dragOverFolder = undefined)}
+    ondrop={(e) => onDropFolder(e, node.path)}
+    onclick={() => toggle(node.path)}
+    onkeydown={(e) => e.key === 'Enter' && toggle(node.path)}
+  >
+    <Icon name={isExpanded(node.path) ? 'chevronDown' : 'chevronRight'} size={12} />
+    <Icon name={isExpanded(node.path) ? 'folderOpen' : 'folder'} size={13} />
+    <span class="fname">{node.name}</span>
+    <span class="fcount">{subtreeCount(node)}</span>
+    <span
+      class="fact"
+      role="button"
+      tabindex="0"
+      title="Add subfolder"
+      onclick={(e) => { e.stopPropagation(); startAddSub(node.path); }}
+      onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), startAddSub(node.path))}
+    >
+      <Icon name="plus" size={12} />
+    </span>
+    <span
+      class="fact fdel"
+      role="button"
+      tabindex="0"
+      title="Remove folder"
+      onclick={(e) => { e.stopPropagation(); askDeleteFolder(node.path); }}
+      onkeydown={(e) => e.key === 'Enter' && (e.stopPropagation(), askDeleteFolder(node.path))}
+    >
+      <Icon name="folderMinus" size={12} />
+    </span>
+  </div>
+  {#if isExpanded(node.path)}
+    {#if addingUnder === node.path}
+      <form
+        class="new-folder sub"
+        style="padding-left: {8 + (depth + 1) * 14}px"
+        onsubmit={(e) => { e.preventDefault(); submitAddSub(); }}
+      >
+        <input
+          class="input"
+          placeholder="Subfolder…"
+          bind:value={newSubName}
+          use:focus
+          onkeydown={(e) => e.key === 'Escape' && (addingUnder = undefined)}
+        />
+        <button class="btn btn-sm" type="submit" title="Create" disabled={!newSubName.trim()}>
+          <Icon name="plus" size={13} />
+        </button>
+      </form>
+    {/if}
+    {#each node.children as child (child.path)}
+      {@render folderNode(child, depth + 1)}
+    {/each}
+    {#each node.entities as e (e.id)}
+      {@render entityRow(e, depth + 1, 'mywork')}
+    {/each}
+  {/if}
+{/snippet}
+
+<!-- one entity row. zone 'saved' → delete everywhere; 'mywork' → unfile only -->
+{#snippet entityRow(e, depth, zone)}
+  {@const isClickable = e.type === 'note' || !!ENTITY_TOOL[e.type]}
+  <div
+    class="entity"
+    class:clickable={isClickable}
+    class:dragging={dragEntityId === e.id}
+    style="padding-left: {8 + depth * 14}px"
+    draggable="true"
+    ondragstart={(ev) => onDragStart(ev, e)}
+    ondragend={() => { dragEntityId = null; dragOverFolder = undefined; }}
+    onclick={() => (e.type === 'note' ? openEditNote(e) : openEntity(e))}
+    role={isClickable ? 'button' : undefined}
+    tabindex={isClickable ? 0 : undefined}
+    onkeydown={(ev) => ev.key === 'Enter' && (e.type === 'note' ? openEditNote(e) : openEntity(e))}
+  >
+    <Icon name="grip" size={13} />
+    <Icon name={ENTITY_ICONS[e.type] ?? 'note'} size={14} />
+    <div class="e-body">
+      <span class="e-label">{e.label}</span>
+      <span class="e-meta">{e.type}</span>
+    </div>
+    <button
+      class="btn btn-ghost btn-sm act"
+      title="Info"
+      onclick={(ev) => { ev.stopPropagation(); openInfo(e); }}
+    >
+      <Icon name="note" size={13} />
+    </button>
+    {#if zone === 'mywork'}
+      <button
+        class="btn btn-ghost btn-sm act del"
+        title="Remove from My work"
+        onclick={(ev) => { ev.stopPropagation(); askRemoveFromMyWork(e); }}
+      >
+        <Icon name="folderMinus" size={13} />
+      </button>
+    {:else}
+      <button
+        class="btn btn-ghost btn-sm act del"
+        title="Delete everywhere"
+        onclick={(ev) => { ev.stopPropagation(); askDeleteEverywhere(e); }}
+      >
+        <Icon name="trash" size={13} />
+      </button>
+    {/if}
+  </div>
+{/snippet}
 
 <!-- Note edit / create modal -->
 {#if noteModal}
@@ -499,7 +678,7 @@
       bind:value={noteModal.title}
     />
 
-    <label class="modal-label" for="note-folder" style="margin-top:10px">Folder</label>
+    <label class="modal-label" for="note-folder" style="margin-top:10px">Folder (in My work)</label>
     <input
       id="note-folder"
       class="input"
@@ -525,7 +704,7 @@
         <button
           class="btn btn-ghost btn-sm"
           style="color:var(--danger,#e55)"
-          onclick={async () => { await removeEntity(noteModal.entity); noteModal = null; }}
+          onclick={() => askDeleteEverywhere(noteModal.entity, () => (noteModal = null))}
         >
           <Icon name="trash" size={13} /> Delete note
         </button>
@@ -619,6 +798,21 @@
   </Modal>
 {/if}
 
+<!-- Confirmation dialog (delete everywhere / remove from My work / remove folder) -->
+{#if confirmState}
+  <ConfirmDialog
+    title={confirmState.title}
+    message={confirmState.message}
+    detail={confirmState.detail}
+    confirmLabel={confirmState.confirmLabel}
+    tone={confirmState.tone}
+    icon={confirmState.icon}
+    busy={confirmBusy}
+    onconfirm={runConfirm}
+    oncancel={() => (confirmState = null)}
+  />
+{/if}
+
 <style>
   .sidebar {
     width: var(--sidebar-w);
@@ -672,14 +866,29 @@
     margin: 0 4px 10px;
     width: calc(100% - 8px);
   }
-  /* folder management */
+  /* tool group header (Saved work) */
+  .grow {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    padding: 6px 8px;
+    border-radius: var(--r-sm);
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+    text-align: left;
+  }
+  .grow:hover { background: var(--bg-2); color: var(--text-1); }
+  .grow > :global(svg:first-child) { color: var(--text-3); flex-shrink: 0; }
+  /* folder tree */
   .new-folder { display: flex; gap: 6px; padding: 2px 8px 8px; }
+  .new-folder.sub { padding: 2px 8px 4px; }
   .new-folder .input { flex: 1; font-size: var(--fs-xs); }
-  .folder-list { display: flex; flex-direction: column; gap: 2px; padding: 0 4px 4px; }
+  .tree { display: flex; flex-direction: column; gap: 1px; padding: 0 4px 4px; }
   .frow {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 7px;
     width: 100%;
     padding: 6px 8px;
     border-radius: var(--r-sm);
@@ -690,27 +899,15 @@
     text-align: left;
   }
   .frow:hover { background: var(--bg-2); }
-  .frow.active { background: var(--accent-soft); color: var(--accent); }
   .frow.dropping { border-color: var(--accent); background: var(--accent-soft); }
+  .frow > :global(svg:first-child) { color: var(--text-3); flex-shrink: 0; }
   .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .fcount { color: var(--text-3); font-size: var(--fs-xs); font-weight: 600; }
-  .fdel { opacity: 0; color: var(--text-3); display: flex; padding: 2px; border-radius: 4px; }
+  .fact { opacity: 0; color: var(--text-3); display: flex; padding: 2px; border-radius: 4px; flex-shrink: 0; }
+  .fact:hover { color: var(--text-1); }
   .fdel:hover { color: var(--danger, #e55); }
-  .frow:hover .fdel { opacity: 1; }
+  .frow:hover .fact { opacity: 1; }
   .hint { font-size: var(--fs-xs); color: var(--text-3); padding: 2px 12px 8px; font-style: italic; }
-  .active-folder {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    margin: 2px 4px 6px;
-    border-radius: 999px;
-    background: var(--accent-soft);
-    color: var(--accent);
-    font-size: var(--fs-xs);
-    width: fit-content;
-  }
-  .clear-filter { display: flex; color: var(--accent); padding: 0; }
   /* entities */
   .entity {
     display: flex;
@@ -748,7 +945,7 @@
   .entity:hover .act { opacity: 1; }
   .del:hover { color: var(--danger, #e55); }
   .suggest-note { font-size: var(--fs-xs); color: var(--accent); padding: 2px 8px 6px; }
-  .none { font-size: var(--fs-xs); color: var(--text-3); padding: 4px 8px 12px; }
+  .none { font-size: var(--fs-xs); color: var(--text-3); padding: 4px 8px 12px; line-height: 1.45; }
   /* note modal */
   .modal-label { display: block; font-size: var(--fs-xs); color: var(--text-3); margin-bottom: 5px; }
   .note-content { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: var(--fs-xs); }
@@ -773,4 +970,3 @@
   .src { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .info-note-body { white-space: pre-wrap; font-size: var(--fs-sm); color: var(--text-2); }
 </style>
-

@@ -7,6 +7,8 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..engine import media as media_engine
+from ..engine import satellite as satellite_engine
 from ..workspace import Case, CaseError
 
 router = APIRouter(prefix="/api/cases", tags=["cases"])
@@ -17,6 +19,13 @@ def get_case(case_id: str) -> Case:
         return Case.open(case_id)
     except CaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _unlink_inside(case: Case, rel_path: str) -> None:
+    try:
+        case.resolve_inside(rel_path).unlink(missing_ok=True)
+    except CaseError:
+        pass
 
 
 class CreateCase(BaseModel):
@@ -136,8 +145,35 @@ def update_entity(case_id: str, entity_id: str, body: EntityPatch) -> dict[str, 
 
 @router.delete("/{case_id}/entities/{entity_id}")
 def remove_entity(case_id: str, entity_id: str) -> dict[str, str]:
+    """Delete an entity and the on-disk artifact it stands for, so removing a
+    row in the sidebar deletes it everywhere it appears (spec §3.5)."""
+    case = get_case(case_id)
+    entity = next((e for e in case.read()["entities"] if e["id"] == entity_id), None)
+    if entity is None:
+        raise HTTPException(status_code=404, detail=f"entity '{entity_id}' not found")
+
+    etype = entity.get("type")
+    attrs = entity.get("attrs", {})
+
+    # media has its own delete that drops file + thumbnail + sidecar + entity
+    if etype == "media" and attrs.get("path"):
+        try:
+            media_engine.delete_media(case, attrs["path"])
+        except CaseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"status": "deleted"}
+
+    # other artifact-backed types: drop the file(s) before removing the row
+    if etype == "place" and attrs.get("path"):
+        satellite_engine.unlink_capture(case, attrs["path"])
+    elif etype == "proof" and attrs.get("spec"):
+        _unlink_inside(case, attrs["spec"])
+        _unlink_inside(case, attrs["spec"].removesuffix(".json") + ".png")
+    elif etype == "post" and attrs.get("draft"):
+        _unlink_inside(case, attrs["draft"])
+
     try:
-        get_case(case_id).remove_entity(entity_id)
+        case.remove_entity(entity_id)
     except CaseError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"status": "deleted"}

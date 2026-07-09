@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ..engine import geo, tiles
+from ..engine import geo, satellite as satellite_engine, tiles
 from .cases import get_case
 
 router = APIRouter(prefix="/api", tags=["satellite"])
@@ -33,6 +33,7 @@ class ParseIn(BaseModel):
 class SatelliteUpdateIn(BaseModel):
     path: str
     notes: str | None = None
+    title: str | None = None
 
 
 @router.get("/satellite/providers")
@@ -93,52 +94,42 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     name = f"sat_{stamp}_z{provenance['zoom']}_{provider.id}.png"
+    rel_path = f"satellite/{name}"
     sat_dir = case.subdir("satellite")
     image.save(sat_dir / name, "PNG")
+    label = satellite_engine.coords_label(body.lat, body.lon)
     provenance["filename"] = name
+    provenance["title"] = label
     provenance["plus_code"] = geo.plus_code(body.lat, body.lon)
     provenance["dms"] = geo.to_dms(body.lat, body.lon)
     (sat_dir / f"{name}.json").write_text(
         json.dumps(provenance, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    # suggest a place entity — analyst confirms or dismisses (spec §3.5)
-    label = f"{body.lat:.6f}, {body.lon:.6f}"
-    if not case.find_entity(attr="coords", value=label):
-        case.add_entity(
-            "place",
-            label,
-            attrs={"coords": label, "lat": body.lat, "lon": body.lon,
-                   "plus_code": provenance["plus_code"]},
-            by="satellite",
-            status="suggested",
-        )
+    # one capture == one place entity, tied by its path (spec §3.5); capturing is
+    # a deliberate act, so it's filed straight away — retitle/refile/delete later
+    case.add_entity(
+        "place",
+        label,
+        attrs={"coords": label, "lat": body.lat, "lon": body.lon,
+               "plus_code": provenance["plus_code"], "path": rel_path,
+               "zoom": provenance["zoom"], "bearing": body.bearing},
+        by="satellite",
+        status="confirmed",
+    )
 
-    return {"path": f"satellite/{name}", **provenance}
+    return {"path": rel_path, **provenance}
 
 
 @router.get("/cases/{case_id}/satellite")
 def list_captures(case_id: str) -> list[dict[str, Any]]:
-    case = get_case(case_id)
-    sat_dir = case.subdir("satellite")
-    captures = []
-    for sidecar in sorted(sat_dir.glob("*.png.json")):
-        image_name = sidecar.name[: -len(".json")]
-        if not (sat_dir / image_name).exists():
-            continue
-        data = json.loads(sidecar.read_text(encoding="utf-8"))
-        data["path"] = f"satellite/{image_name}"
-        captures.append(data)
-    captures.sort(key=lambda d: d.get("fetched_at") or "", reverse=True)
-    return captures
+    return satellite_engine.list_captures(get_case(case_id))
 
 
 @router.delete("/cases/{case_id}/satellite")
 def delete_capture(case_id: str, path: str) -> dict[str, str]:
-    case = get_case(case_id)
-    image = case.resolve_inside(path)
-    image.unlink(missing_ok=True)
-    image.with_name(image.name + ".json").unlink(missing_ok=True)
+    # also drops the mirrored place entity when its last capture is gone
+    satellite_engine.delete_capture(get_case(case_id), path)
     return {"status": "deleted"}
 
 
@@ -160,6 +151,15 @@ def update_capture(case_id: str, body: SatelliteUpdateIn) -> dict[str, Any]:
             data.pop("notes", None)
         else:
             data["notes"] = body.notes
+    if body.title is not None:
+        # empty title falls back to the coordinates; keep entity label in sync
+        title = body.title.strip() or satellite_engine.coords_label(
+            data["lat"], data["lon"]
+        )
+        data["title"] = title
+        entity = case.find_entity(attr="path", value=body.path)
+        if entity:
+            case.update_entity(entity["id"], {"label": title})
     sidecar_path.write_text(
         json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )

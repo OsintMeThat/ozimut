@@ -11,6 +11,7 @@ export const caseState = $state({
   current: null, // { id, name, scratch, entities, links, ... }
   list: [],
   loading: false,
+  rev: 0, // bumped on every reload so tools can re-fetch their own artifacts
 });
 
 export const uiState = $state({
@@ -23,6 +24,7 @@ export const uiState = $state({
   openProof: null, // proof name to load in the Proof Composer
   openDraft: null, // draft name to load in the Post Composer
   inspectPath: null, // media path to open in the Inspect tool
+  openInspect: null, // inspect-session name to reopen in the Inspect tool
   gotoCoords: null, // { lat, lon } to fly to in the Satellite tool
 });
 
@@ -87,6 +89,7 @@ export async function initSession() {
 export async function reloadCase() {
   if (caseState.current) {
     caseState.current = await api.get(`/api/cases/${caseState.current.id}`);
+    caseState.rev++;
   }
 }
 

@@ -67,19 +67,25 @@
 
   $effect(() => {
     const id = caseState.current?.id;
-    if (id !== capturesFor) {
-      capturesFor = id;
+    caseState.rev; // re-fetch when the case is reloaded elsewhere (e.g. sidebar delete)
+    if (!id) {
+      capturesFor = null;
       captures = [];
-      if (id) api.get(`/api/cases/${id}/satellite`).then((r) => (captures = r));
+      return;
     }
+    capturesFor = id;
+    api.get(`/api/cases/${id}/satellite`).then((r) => (captures = r));
   });
 
-  // fly to coordinates handed off from the sidebar (place entity click)
+  // fly to coordinates handed off from the sidebar (place entity click) —
+  // match the capture's own zoom/bearing, like clicking its card
   $effect(() => {
     const target = uiState.gotoCoords;
     if (mapReady && target && Number.isFinite(target.lat) && Number.isFinite(target.lon)) {
       uiState.gotoCoords = null;
-      map.setView([target.lat, target.lon], Math.max(map.getZoom(), 16));
+      const zoom = Number.isFinite(target.zoom) ? target.zoom : Math.max(map.getZoom(), 16);
+      map.setView([target.lat, target.lon], zoom);
+      setBearing(Number.isFinite(target.bearing) ? target.bearing : 0);
     }
   });
 
@@ -143,16 +149,20 @@
       `/api/cases/${caseState.current.id}/satellite?path=${encodeURIComponent(item.path)}`
     );
     captures = captures.filter((c) => c.path !== item.path);
+    // the capture's place entity may have gone with it — refresh the sidebar
+    await reloadCase();
   }
 
-  // --- notes modal ---
+  // --- details modal (title + notes) ---
   let notesItem = $state(null);
   let notesText = $state('');
+  let notesTitle = $state('');
   let notesSaving = $state(false);
 
   function openNotes(item) {
     notesItem = item;
     notesText = item.notes ?? '';
+    notesTitle = item.title ?? coordsLabel(item);
   }
 
   async function saveNotes() {
@@ -161,17 +171,23 @@
     try {
       const updated = await api.patch(
         `/api/cases/${caseState.current.id}/satellite`,
-        { path: notesItem.path, notes: notesText }
+        { path: notesItem.path, notes: notesText, title: notesTitle }
       );
       const idx = captures.findIndex((c) => c.path === notesItem.path);
       if (idx !== -1) captures[idx] = updated;
       notesItem = null;
+      // the mirrored place entity was retitled too — refresh the sidebar
+      await reloadCase();
       toast('Saved', 'ok', 1600);
     } catch (e) {
       toast(e.message, 'danger');
     } finally {
       notesSaving = false;
     }
+  }
+
+  function coordsLabel(item) {
+    return `${item.lat.toFixed(6)}, ${item.lon.toFixed(6)}`;
   }
 
   function sendToComposer(item) {
@@ -347,7 +363,8 @@
                   loading="lazy"
                 />
                 <div class="cap-meta">
-                  <span class="mono coords">{item.lat.toFixed(6)}, {item.lon.toFixed(6)}</span>
+                  <span class="title">{item.title ?? coordsLabel(item)}</span>
+                  <span class="mono coords">{coordsLabel(item)}</span>
                   <span class="prov">z{item.zoom}{item.bearing ? ` · ${Math.round(item.bearing)}°` : ''} · {item.provider_label} · {item.fetched_at?.slice(0, 10)}</span>
                 </div>
               </button>
@@ -396,7 +413,14 @@
 
 <!-- satellite notes modal -->
 {#if notesItem}
-  <Modal title="Capture notes" onclose={() => (notesItem = null)} width="420px">
+  <Modal title="Capture details" onclose={() => (notesItem = null)} width="420px">
+    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
+    <input
+      class="input"
+      placeholder={coordsLabel(notesItem)}
+      bind:value={notesTitle}
+    />
+    <hr style="border:none;border-top:1px solid var(--border);margin:12px 0" />
     <div class="sat-info-rows">
       <div class="sat-info-row">
         <span class="sat-info-label">Coordinates</span>
@@ -692,9 +716,20 @@
     display: flex;
     flex-direction: column;
   }
+  .title {
+    font-size: var(--fs-sm);
+    color: var(--text-1);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .coords {
     font-size: var(--fs-xs);
-    color: var(--text-1);
+    color: var(--text-3);
+  }
+  .cap-goto:hover .title {
+    color: var(--accent);
   }
   .prov {
     font-size: var(--fs-xs);
