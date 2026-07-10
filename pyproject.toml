@@ -38,11 +38,15 @@ azimut = "azimut.cli:main"
 [project.urls]
 Homepage = "https://github.com/OsintMeThat/azimut"
 
+# The frontend builds into src/azimut/static (git-ignored). Force it into BOTH
+# the sdist and the wheel — `python -m build` builds the wheel from the sdist,
+# so if the sdist omits static the shipped wheel has no UI. Run `npm run build`
+# before building the package.
+[tool.hatch.build]
+artifacts = ["src/azimut/static/**"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/azimut"]
-# The frontend builds into src/azimut/static (git-ignored); force it into the
-# wheel so `pip install azimut` ships a working UI. Run `npm run build` first.
-artifacts = ["src/azimut/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
