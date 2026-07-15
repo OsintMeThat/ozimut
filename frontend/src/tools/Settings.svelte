@@ -2,10 +2,18 @@
   import { onMount } from 'svelte';
   import { api } from '../lib/api.js';
   import { toast } from '../lib/state.svelte.js';
-  import { monthCount, tilesOfFree, freeTierShare } from '../lib/usage.js';
+  import {
+    monthCount,
+    tilesOfFree,
+    freeTierShare,
+    usageBlocked,
+    USAGE_LINKS,
+    BLOCK_SHARE,
+    ECO_MAX_ZOOM,
+  } from '../lib/usage.js';
   import Icon from '../components/Icon.svelte';
 
-  // The keyed imagery providers the app knows how to light up (KEYED_PROVIDERS.md).
+  // The keyed imagery providers the app knows how to light up (IMAGERY_PROVIDERS.md).
   // Keys are app-wide, stored locally in settings.json, never written into a
   // case folder or export bundle — they're the user's own billing identity.
   const KEYED = [
@@ -15,9 +23,10 @@
       field: 'Mapbox public access token',
       placeholder: 'pk.…',
       help: 'https://account.mapbox.com/access-tokens/',
+      usage: USAGE_LINKS.mapbox,
       unlocks: 'Mapbox Satellite basemap',
       overage:
-        'Beyond the free tier, Mapbox bills extra tiles automatically (pay-as-you-go, per 1,000). Set a spending alert in your Mapbox account.',
+        'Beyond 200k free tiles/month, Mapbox bills extra tiles automatically ($0.50 per 1,000, pay-as-you-go — no hard cap available). Set a spending alert in your Mapbox account.',
     },
     {
       id: 'google',
@@ -25,9 +34,10 @@
       field: 'Google Maps Platform API key',
       placeholder: 'AIza…',
       help: 'https://developers.google.com/maps/documentation/tile/get-api-key',
+      usage: USAGE_LINKS.google,
       unlocks: 'Google Satellite basemap (Map Tiles API)',
       overage:
-        'Beyond the free tier, Google bills extra tiles to your Cloud project (per 1,000). A quota cap in the Cloud Console makes it stop serving instead of billing.',
+        'Beyond 100k free tiles/month, Google bills extra tiles to your Cloud project ($0.60 per 1,000; Google also enforces 15k tiles/day). A quota cap in the Cloud Console makes it stop serving instead of billing.',
     },
   ];
 
@@ -38,12 +48,35 @@
   let saving = $state(false);
   let testing = $state({ mapbox: false, google: false });
   let testResult = $state({ mapbox: null, google: null }); // { ok, detail } | null
+  // keyed-provider preferences (IMAGERY_PROVIDERS.md) — saved on toggle
+  let enabled = $state({ mapbox: true, google: true });
+  let overrides = $state({ mapbox: false, google: false });
+  let eco = $state(true);
+  let ecoMaxZoom = $state(ECO_MAX_ZOOM);
 
   async function load() {
     const s = await api.get('/api/settings');
     keys = { mapbox: s.api_keys.mapbox ?? '', google: s.api_keys.google ?? '' };
     usage = s.usage;
     month = s.month;
+    enabled = { mapbox: s.providers_enabled.mapbox ?? true, google: s.providers_enabled.google ?? true };
+    overrides = { mapbox: !!s.usage_overrides.mapbox, google: !!s.usage_overrides.google };
+    eco = s.eco_zoom_fallback;
+    ecoMaxZoom = s.eco_max_zoom ?? ECO_MAX_ZOOM;
+  }
+
+  async function savePrefs() {
+    try {
+      const saved = await api.put('/api/settings/prefs', {
+        providers_enabled: enabled,
+        usage_overrides: overrides,
+        eco_zoom_fallback: eco,
+        eco_max_zoom: Number(ecoMaxZoom) || ECO_MAX_ZOOM,
+      });
+      ecoMaxZoom = saved.eco_max_zoom; // reflect the server's clamping
+    } catch (e) {
+      toast(`Could not save preferences: ${e.message}`, 'danger');
+    }
   }
 
   onMount(() => {
@@ -133,6 +166,15 @@
           </div>
           <div class="key-foot">
             <span class="unlocks">Unlocks: {k.unlocks}</span>
+            {#if keys[k.id]}
+              <label
+                class="toggle"
+                title="Hide or show this basemap in the Satellite tab — the key stays saved"
+              >
+                <input type="checkbox" bind:checked={enabled[k.id]} onchange={savePrefs} />
+                enabled
+              </label>
+            {/if}
             {#if testResult[k.id]}
               <span class="verdict" class:ok={testResult[k.id].ok} class:bad={!testResult[k.id].ok}>
                 <Icon name={testResult[k.id].ok ? 'check' : 'alert'} size={12} />
@@ -166,16 +208,34 @@
               {@const share = freeTierShare(count, k.id)}
               <div class="usage-row">
                 <div class="usage-line">
-                  <span class="usage-name">{k.label}</span>
+                  <span class="usage-name">
+                    {k.label}
+                    <a href={k.usage} target="_blank" rel="noreferrer"
+                      title="The provider's own usage & limits dashboard — the counter that actually bills"
+                    >usage & limits <Icon name="external" size={11} /></a>
+                  </span>
                   <span class="mono">{tilesOfFree(count, k.id)}</span>
                 </div>
                 <div class="meter-track" aria-hidden="true">
                   <div
                     class="meter-fill"
-                    class:hot={share >= 0.9}
+                    class:hot={share >= BLOCK_SHARE}
                     style="width:{Math.min(share * 100, 100)}%"
                   ></div>
                 </div>
+                {#if usageBlocked(count, k.id, overrides)}
+                  <p class="blocked">
+                    <Icon name="alert" size={12} />
+                    Paused at {Math.round(BLOCK_SHARE * 100)}% of the free tier — the map and
+                    captures fall back to free imagery until next month, or:
+                  </p>
+                {/if}
+                {#if share >= BLOCK_SHARE || overrides[k.id]}
+                  <label class="toggle override" title="Serve past the pause — extra tiles are billed by the provider">
+                    <input type="checkbox" bind:checked={overrides[k.id]} onchange={savePrefs} />
+                    keep serving past {Math.round(BLOCK_SHARE * 100)}% (billed)
+                  </label>
+                {/if}
                 <p class="overage">{k.overage}</p>
               </div>
             {/if}
@@ -184,6 +244,23 @@
       {:else}
         <p class="none">No keyed provider configured yet.</p>
       {/if}
+      <label
+        class="toggle eco"
+        title="Zoomed out this far, billed basemaps silently swap to free imagery — paid detail only matters up close"
+      >
+        <input type="checkbox" bind:checked={eco} onchange={savePrefs} />
+        Eco mode: use free imagery when zoomed out, up to z ≤
+        <input
+          class="input eco-zoom"
+          type="number"
+          min="1"
+          max="21"
+          bind:value={ecoMaxZoom}
+          onchange={savePrefs}
+          disabled={!eco}
+          aria-label="Eco mode zoom threshold"
+        />
+      </label>
       <button class="btn btn-ghost btn-sm" onclick={() => load()} title="Refresh counters">
         <Icon name="reset" size={13} /> Refresh
       </button>
@@ -334,6 +411,50 @@
     margin-top: 5px;
     color: var(--text-3);
     font-size: var(--fs-xs);
+    line-height: 1.4;
+  }
+  .usage-name a {
+    color: var(--accent);
+    font-weight: 400;
+    font-size: var(--fs-xs);
+    margin-left: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--fs-xs);
+    color: var(--text-2);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle input {
+    accent-color: var(--accent);
+    margin: 0;
+  }
+  .toggle.override {
+    margin-top: 6px;
+    color: var(--danger);
+  }
+  .toggle.eco {
+    display: flex;
+    margin: 2px 0 10px;
+  }
+  .eco-zoom {
+    width: 58px;
+    padding: 2px 6px;
+    font-family: var(--font-mono);
+  }
+  .blocked {
+    margin-top: 6px;
+    color: var(--danger);
+    font-size: var(--fs-xs);
+    display: flex;
+    align-items: center;
+    gap: 5px;
     line-height: 1.4;
   }
   .none {
