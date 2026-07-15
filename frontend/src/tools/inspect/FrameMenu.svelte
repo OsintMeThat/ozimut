@@ -98,7 +98,7 @@
       </div>
     {/each}
     {#if session.frames.length === 0}
-      <p class="empty">No frames yet — capture some in the Selection tab.</p>
+      <p class="empty">No frames yet. Capture some in the Selection tab.</p>
     {/if}
   </div>
 
@@ -218,7 +218,7 @@
     height: 15px;
     padding: 0 3px;
     border-radius: 4px;
-    background: rgba(6, 9, 14, 0.7);
+    background: rgba(10, 10, 10, 0.7);
     color: #fff;
     font-size: 10px;
     font-weight: 700;

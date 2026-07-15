@@ -1,33 +1,35 @@
 /* ============================================================
-   Azimut design system — dark, focused, an investigator's desk.
+   Azimut design system — the investigator's desk.
+   Neutral, dense, flat: an instrument, not a dashboard.
    Every component consumes these tokens; no hardcoded colors.
+   Direction: docs/UI.md §2.
    ============================================================ */
 
 :root {
   /* -- palette ------------------------------------------------ */
-  --bg-0: #0b0f17;            /* app background (deep night) */
-  --bg-1: #101623;            /* panels, sidebar */
-  --bg-2: #161e2e;            /* raised: cards, inputs */
-  --bg-3: #1d2739;            /* hover states, active rows */
-  --border: rgba(148, 163, 196, 0.14);
-  --border-strong: rgba(148, 163, 196, 0.28);
+  --bg-0: #151515;            /* app background */
+  --bg-1: #1c1c1c;            /* panels, sidebar */
+  --bg-2: #252525;            /* raised: cards, inputs */
+  --bg-3: #2f2f2f;            /* hover states, active rows */
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.18);
 
-  --text-1: #e8edf6;          /* primary text */
-  --text-2: #9aa7bd;          /* secondary text */
-  --text-3: #5d6b84;          /* hints, placeholders */
+  --text-1: #e3e3e3;          /* primary text */
+  --text-2: #9f9f9f;          /* secondary text */
+  --text-3: #6c6c6c;          /* hints, placeholders */
 
-  --accent: #e8a33d;          /* azimuth amber */
+  --accent: #e8a33d;          /* azimuth amber — selection & primary action only */
   --accent-hover: #f4b558;
   --accent-soft: rgba(232, 163, 61, 0.14);
-  --accent-text: #0b0f17;     /* text on accent */
+  --accent-text: #141414;     /* text on accent */
 
-  --ok: #4ade80;
-  --ok-soft: rgba(74, 222, 128, 0.12);
-  --warn: #fbbf24;
-  --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.12);
-  --info: #60a5fa;
-  --info-soft: rgba(96, 165, 250, 0.12);
+  --ok: #66b578;
+  --ok-soft: rgba(102, 181, 120, 0.12);
+  --warn: #d9a53f;
+  --danger: #d97070;
+  --danger-soft: rgba(217, 112, 112, 0.12);
+  --info: #6f9fd8;
+  --info-soft: rgba(111, 159, 216, 0.12);
 
   /* annotation palette — high-contrast on both photo & satellite */
   --anno-1: #ff5252;
@@ -50,12 +52,12 @@
   --fs-xl: 1.35rem;
 
   /* -- geometry ------------------------------------------------ */
-  --r-sm: 6px;
-  --r-md: 10px;
-  --r-lg: 14px;
-  --rail-w: 76px;
+  --r-sm: 3px;
+  --r-md: 4px;
+  --r-lg: 6px;
+  --rail-w: 64px;
   --sidebar-w: 320px;
-  --topbar-h: 52px;
+  --topbar-h: 44px;
 
   --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.5);
@@ -154,25 +156,20 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 14px;
+  padding: 5px 12px;
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
-  font-weight: 600;
-  letter-spacing: 0.01em;
+  font-weight: 500;
   background: var(--bg-2);
   border: 1px solid var(--border);
   color: var(--text-1);
-  transition: background 0.15s var(--ease), border-color 0.15s var(--ease),
-    transform 0.1s var(--ease);
+  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
   white-space: nowrap;
   user-select: none;
 }
 .btn:hover:not(:disabled, .disabled) {
   background: var(--bg-3);
   border-color: var(--border-strong);
-}
-.btn:active:not(:disabled, .disabled) {
-  transform: translateY(1px);
 }
 /* an <a class="btn"> can never match :disabled — it opts out with .disabled
    instead (and drops its href, so it doesn't navigate either) */
@@ -186,6 +183,7 @@ a:hover {
   background: var(--accent);
   border-color: transparent;
   color: var(--accent-text);
+  font-weight: 600;
 }
 .btn-primary:hover:not(:disabled, .disabled) {
   background: var(--accent-hover);
@@ -211,7 +209,7 @@ a:hover {
 }
 
 .btn-sm {
-  padding: 4px 9px;
+  padding: 3px 8px;
   font-size: var(--fs-xs);
 }
 
@@ -219,7 +217,7 @@ a:hover {
 .textarea,
 .select {
   width: 100%;
-  padding: 8px 11px;
+  padding: 6px 10px;
   border-radius: var(--r-sm);
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -236,7 +234,7 @@ a:hover {
 .select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 .textarea {
   resize: vertical;
@@ -252,9 +250,9 @@ a:hover {
 .label {
   display: block;
   font-size: var(--fs-xs);
-  font-weight: 600;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.07em;
+  letter-spacing: 0.05em;
   color: var(--text-3);
   margin-bottom: 5px;
 }
@@ -269,10 +267,10 @@ a:hover {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 8px;
-  border-radius: 99px;
+  padding: 2px 7px;
+  border-radius: var(--r-sm);
   font-size: var(--fs-xs);
-  font-weight: 600;
+  font-weight: 500;
   background: var(--bg-3);
   color: var(--text-2);
 }
@@ -328,12 +326,12 @@ a:hover {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 14px 20px 12px;
+  padding: 10px 16px 9px;
   border-bottom: 1px solid var(--border);
 }
 .tool-header h2 {
   font-size: var(--fs-lg);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 .tool-header .sub {
@@ -344,18 +342,4 @@ a:hover {
   flex: 1;
   min-height: 0;
   overflow: auto;
-}
-
-@keyframes fade-up {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-.fade-up {
-  animation: fade-up 0.22s var(--ease);
 }

@@ -8,7 +8,7 @@
 
 <div class="toasts" use:portal>
   {#each uiState.toasts as t (t.id)}
-    <div class="toast {t.kind} fade-up">
+    <div class="toast {t.kind}">
       <Icon name={icons[t.kind] ?? 'compass'} size={15} />
       <span>{t.message}</span>
     </div>

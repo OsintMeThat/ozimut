@@ -211,7 +211,7 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    background: rgba(16, 22, 35, 0.92);
+    background: rgba(24, 24, 24, 0.92);
     backdrop-filter: blur(6px);
     box-shadow: var(--shadow-2);
     user-select: none;

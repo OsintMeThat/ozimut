@@ -16,7 +16,7 @@
   {#if savables.length === 0}
     <div class="empty">
       <Icon name="save" size={34} />
-      <p>Nothing to save yet — capture frames, build a collage, or adjust the video first.</p>
+      <p>Nothing to save yet. Capture frames, build a collage, or adjust the video first.</p>
     </div>
   {:else}
     {#each savables as it (it.key)}
@@ -124,7 +124,7 @@
     position: absolute;
     top: 4px;
     left: 4px;
-    background: rgba(6, 9, 14, 0.6);
+    background: rgba(10, 10, 10, 0.6);
     color: #fff;
     border-radius: 4px;
     display: flex;
@@ -165,7 +165,7 @@
     letter-spacing: 0.04em;
     padding: 1px 5px;
     border-radius: 4px;
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--bg-3);
+    color: var(--text-2);
   }
 </style>

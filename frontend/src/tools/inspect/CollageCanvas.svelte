@@ -532,7 +532,7 @@
     pointer-events: none;
   }
   .tbtn.on {
-    background: var(--accent-soft);
+    background: var(--bg-3);
   }
   .view-ctl {
     position: absolute;
@@ -543,7 +543,7 @@
     gap: 8px;
     padding: 3px 6px;
     border-radius: var(--r-md);
-    background: rgba(16, 20, 28, 0.85);
+    background: rgba(22, 22, 22, 0.85);
     border: 1px solid var(--border);
   }
   .zoom-val {
@@ -572,8 +572,8 @@
     transform: translate(-50%, -50%);
     display: flex;
     align-items: center;
-    border-radius: 999px;
-    background: rgba(16, 20, 28, 0.92);
+    border-radius: var(--r-md);
+    background: rgba(22, 22, 22, 0.92);
     border: 1px solid var(--accent);
     box-shadow: var(--shadow-2);
     touch-action: none;
@@ -619,7 +619,7 @@
     align-items: center;
     justify-content: center;
     border-radius: 50%;
-    background: rgba(16, 20, 28, 0.92);
+    background: rgba(22, 22, 22, 0.92);
     color: var(--accent);
     border: 1px solid var(--accent);
     cursor: grab;

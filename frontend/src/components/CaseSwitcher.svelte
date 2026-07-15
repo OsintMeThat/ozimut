@@ -110,7 +110,7 @@
       <span class="name">{caseState.current.name}</span>
       {#if caseState.current.scratch}<span class="badge accent">scratch</span>{/if}
     {:else}
-      <span class="name none">No case — one-shot mode</span>
+      <span class="name none">No case (one-shot mode)</span>
     {/if}
     <Icon name="chevronDown" size={14} />
   </button>
@@ -129,7 +129,7 @@
 
   {#if open}
     <button class="backdrop" onclick={() => (open = false)} aria-label="Close menu"></button>
-    <div class="menu card fade-up">
+    <div class="menu card">
       <button
         class="item new"
         onclick={() => {
@@ -178,7 +178,7 @@
         {/each}
       {/if}
       {#if !named.length && !scratches.length}
-        <div class="hint">No cases yet — tools work without one.</div>
+        <div class="hint">No cases yet. Tools work without one.</div>
       {/if}
     </div>
   {/if}
@@ -332,10 +332,10 @@
     background: var(--bg-2);
   }
   .row.active {
-    background: var(--accent-soft);
+    background: var(--bg-3);
   }
   .row.active .item {
-    color: var(--accent);
+    color: var(--text-1);
   }
   .row .item {
     flex: 1;
@@ -375,8 +375,8 @@
     background: var(--bg-2);
   }
   .item.active {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--bg-3);
+    color: var(--text-1);
   }
   .warn {
     display: flex;

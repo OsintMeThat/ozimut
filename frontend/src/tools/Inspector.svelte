@@ -407,7 +407,7 @@
       frame.adjust = videoSeed(filters, session.videoAdjust);
       session.frames.push(frame);
       session.activeFrameId = frame.id;
-      toast('Frame added to tray — not saved yet', 'ok');
+      toast('Frame added to tray. Not saved yet', 'ok');
     } catch (e) {
       toast(e.message, 'danger');
     }
@@ -724,7 +724,7 @@
       openedSession = { name: res.name, title };
       await reloadCase();
       sessionModal.open = false;
-      toast('Session saved — reopen it from the sidebar', 'ok');
+      toast('Session saved. Reopen it from the sidebar', 'ok');
     } catch (e) {
       toast(e.message, 'danger');
     } finally {
@@ -822,7 +822,6 @@
 <div class="tool">
   <div class="tool-header">
     <h2>Inspect</h2>
-    <span class="sub">a scratch workspace — capture, tune, collage; save only what you keep</span>
     <div class="spacer"></div>
     {#if caseState.current}
       <button class="btn btn-sm" onclick={openLoadDialog} title="Reopen a saved session">
@@ -856,7 +855,7 @@
     <div class="empty">
       <Icon name="inspect" size={40} />
       <p>Open a case and add media to start inspecting.</p>
-      <button class="btn btn-primary" onclick={() => (uiState.tool = 'media')}>Go to Media Library</button>
+      <button class="btn" onclick={() => (uiState.tool = 'media')}>Go to Media Library</button>
     </div>
   {:else if !session.source}
     <div class="empty">
@@ -979,7 +978,7 @@
           {:else}
             <div class="hint-mid">
               <Icon name="image" size={34} />
-              <p>No frame selected — capture frames in the Selection tab.</p>
+              <p>No frame selected. Capture frames in the Selection tab.</p>
             </div>
           {/if}
         {:else if activeTab === 'collage'}
@@ -1039,7 +1038,7 @@
         </div>
 
         {#if sessionModal.mode === 'save'}
-          <p class="modal-hint">Persist this whole workspace — frames, adjustments and the collage — to reopen later. Saving the session does not file any media.</p>
+          <p class="modal-hint">Persist the whole workspace (frames, adjustments, collages) to reopen later. Saving the session does not file any media.</p>
           <input
             class="input"
             placeholder="Session name"
@@ -1147,8 +1146,8 @@
     background: var(--bg-2);
   }
   .tab.active {
-    color: var(--accent);
-    background: var(--accent-soft);
+    color: var(--text-1);
+    background: var(--bg-3);
   }
   .workspace {
     flex: 1;
@@ -1258,7 +1257,7 @@
     gap: 8px;
     padding: 3px 6px;
     border-radius: var(--r-md);
-    background: rgba(16, 20, 28, 0.85);
+    background: rgba(22, 22, 22, 0.85);
     border: 1px solid var(--border);
   }
   .zoom-val {
@@ -1286,7 +1285,7 @@
   .modal-back {
     position: fixed;
     inset: 0;
-    background: rgba(6, 9, 14, 0.6);
+    background: rgba(10, 10, 10, 0.6);
     display: flex;
     align-items: center;
     justify-content: center;

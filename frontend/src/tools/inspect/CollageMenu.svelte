@@ -241,8 +241,8 @@
     background: var(--bg-1);
   }
   .ctab.active {
-    border-color: var(--accent);
-    background: var(--accent-soft);
+    border-color: var(--border-strong);
+    background: var(--bg-3);
   }
   .ctab-name {
     display: flex;
