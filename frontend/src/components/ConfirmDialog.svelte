@@ -1,5 +1,6 @@
 <script>
   import Icon from './Icon.svelte';
+  import { portal } from '../lib/fullscreen.js';
 
   // A small, styled confirmation dialog — replaces the browser confirm() popup.
   // Tone drives the accent so a destructive action reads differently from a
@@ -28,6 +29,7 @@
 
 <div
   class="overlay"
+  use:portal
   onclick={(e) => e.target === e.currentTarget && oncancel?.()}
   role="presentation"
 >

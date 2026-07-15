@@ -1,11 +1,12 @@
 <script>
   import { uiState } from '../lib/state.svelte.js';
   import Icon from './Icon.svelte';
+  import { portal } from '../lib/fullscreen.js';
 
   const icons = { info: 'compass', ok: 'check', danger: 'alert', warn: 'alert' };
 </script>
 
-<div class="toasts">
+<div class="toasts" use:portal>
   {#each uiState.toasts as t (t.id)}
     <div class="toast {t.kind} fade-up">
       <Icon name={icons[t.kind] ?? 'compass'} size={15} />

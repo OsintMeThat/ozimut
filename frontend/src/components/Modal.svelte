@@ -1,5 +1,6 @@
 <script>
   import Icon from './Icon.svelte';
+  import { portal } from '../lib/fullscreen.js';
 
   let { title, onclose, width = '440px', children } = $props();
 
@@ -10,7 +11,12 @@
 
 <svelte:window {onkeydown} />
 
-<div class="overlay" onclick={(e) => e.target === e.currentTarget && onclose?.()} role="presentation">
+<div
+  class="overlay"
+  use:portal
+  onclick={(e) => e.target === e.currentTarget && onclose?.()}
+  role="presentation"
+>
   <div class="modal fade-up" style:width role="dialog" aria-label={title}>
     <header>
       <h3>{title}</h3>
