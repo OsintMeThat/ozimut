@@ -315,7 +315,6 @@
 >
   <div class="tool-header">
     <h2>Media Library</h2>
-    <span class="sub">import files or download by URL — hashed &amp; filed in the case</span>
     <div class="spacer"></div>
     <form
       class="dl-form"
@@ -326,7 +325,7 @@
     >
       <input
         class="input"
-        placeholder="https://x.com/…  https://t.me/…  https://youtube.com/…"
+        placeholder="Paste a link (X, Telegram, YouTube…)"
         bind:value={url}
       />
       <button type="submit" class="btn btn-primary" disabled={!url.trim()}>
@@ -409,7 +408,7 @@
 
   <div class="tool-body">
     {#each jobs as job (job.id)}
-      <div class="job card fade-up">
+      <div class="job card">
         <Icon name="download" size={15} />
         <span class="job-url mono" title={job.url}>{job.label ?? job.url}</span>
         <div class="bar">
@@ -430,10 +429,7 @@
       <div class="empty" style="height: 100%">
         <div class="empty-icon"><Icon name="media" size={42} /></div>
         <h3>No media yet</h3>
-        <p>
-          Drop files anywhere on this page, or paste a URL from X, Telegram, TikTok, YouTube…
-          Every file is SHA-256 hashed and its origin recorded.
-        </p>
+        <p>Drop files here, or paste a URL above.</p>
       </div>
     {:else if filteredItems.length === 0}
       <div class="empty" style="height: 100%">
@@ -445,7 +441,7 @@
       <div class="grid">
         {#each filteredItems as item (item.path)}
           <div
-            class="media-card card fade-up"
+            class="media-card card"
             class:focused={item.path === focusedPath}
             data-path={item.path}
           >
@@ -547,7 +543,7 @@
      with several photos) — pick which ones to download, before anything is fetched -->
 {#if picker}
   <Modal title="Choose media to download" onclose={() => (picker = null)} width="560px">
-    <p class="picker-hint">This link has {picker.items.length} attachments — pick which to fetch.</p>
+    <p class="picker-hint">This link has {picker.items.length} attachments. Pick which to fetch.</p>
     <div class="picker-toolbar">
       <button class="btn btn-ghost btn-sm" onclick={() => selectAllPicker(true)}>Select all</button>
       <button class="btn btn-ghost btn-sm" onclick={() => selectAllPicker(false)}>Select none</button>
@@ -789,7 +785,7 @@
     align-items: center;
     gap: 5px;
     padding: 4px 10px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     border: 1px solid var(--border);
     background: var(--bg-2);
     color: var(--text-2);
@@ -803,9 +799,9 @@
     color: var(--text-1);
   }
   .folder-chip.active {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-    color: var(--accent);
+    border-color: var(--border-strong);
+    background: var(--bg-3);
+    color: var(--text-1);
   }
   .chip-count {
     font-size: var(--fs-xs);
@@ -825,7 +821,7 @@
     gap: 6px;
     padding: 4px 8px;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     background: var(--bg-2);
     color: var(--text-3);
     flex-shrink: 0;
@@ -909,11 +905,10 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    transition: border-color 0.15s var(--ease), transform 0.15s var(--ease);
+    transition: border-color 0.15s var(--ease);
   }
   .media-card:hover {
     border-color: var(--border-strong);
-    transform: translateY(-1px);
   }
   .media-card.focused {
     border-color: var(--accent);
@@ -945,7 +940,7 @@
     position: absolute;
     top: 8px;
     left: 8px;
-    background: rgba(11, 15, 23, 0.75);
+    background: rgba(16, 16, 16, 0.75);
     backdrop-filter: blur(4px);
   }
   .folder-badge {
@@ -955,7 +950,7 @@
     display: flex;
     align-items: center;
     gap: 3px;
-    background: rgba(11, 15, 23, 0.75);
+    background: rgba(16, 16, 16, 0.75);
     backdrop-filter: blur(4px);
     font-size: 10px;
     max-width: 90px;
@@ -1000,7 +995,7 @@
   .drop-overlay {
     position: absolute;
     inset: 0;
-    background: rgba(11, 15, 23, 0.8);
+    background: rgba(16, 16, 16, 0.8);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1130,7 +1125,7 @@
   }
   .picker-row.selected {
     border-color: var(--accent);
-    background: var(--accent-soft);
+    background: var(--bg-3);
   }
   .picker-thumb {
     width: 44px;
@@ -1185,11 +1180,11 @@
     transform: translateY(-50%);
     padding: 14px 8px;
     color: var(--text-1);
-    background: rgba(11, 15, 23, 0.55);
+    background: rgba(16, 16, 16, 0.55);
     border-radius: var(--r-md);
   }
   .lb-nav:hover {
-    background: rgba(11, 15, 23, 0.85);
+    background: rgba(16, 16, 16, 0.85);
   }
   .lb-nav.prev {
     left: 14px;
@@ -1204,9 +1199,9 @@
     transform: translateX(-50%);
     font-size: var(--fs-xs);
     color: var(--text-2);
-    background: rgba(11, 15, 23, 0.75);
+    background: rgba(16, 16, 16, 0.75);
     padding: 4px 12px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     white-space: nowrap;
   }
 </style>

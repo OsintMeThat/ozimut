@@ -152,7 +152,7 @@
     position: absolute;
     box-sizing: border-box;
     border: 1.5px solid var(--accent);
-    box-shadow: 0 0 0 9999px rgba(6, 9, 14, 0.55);
+    box-shadow: 0 0 0 9999px rgba(10, 10, 10, 0.55);
     pointer-events: auto;
     cursor: move;
   }

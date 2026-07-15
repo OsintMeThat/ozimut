@@ -156,7 +156,7 @@
       anchorSize: 11,
       anchorCornerRadius: 3,
       anchorStroke: '#e8a33d',
-      anchorFill: '#161e2e',
+      anchorFill: '#252525',
       borderStroke: '#e8a33d',
       borderDash: [4, 3],
       ignoreStroke: true,
@@ -278,7 +278,7 @@
 
   async function openPicker() {
     if (!caseState.current) {
-      toast('Add media first — the composer works on case images', 'info');
+      toast('Add media first. The composer works on case images', 'info');
       uiState.tool = 'media';
       return;
     }
@@ -881,7 +881,7 @@
     if (h > height) { h = height; w = height * aspect; }
     const gx = (width - w) / 2;
     const gy = (height - h) / 2;
-    const dim = 'rgba(9, 12, 20, 0.62)';
+    const dim = 'rgba(14, 14, 14, 0.62)';
     const masks = [
       { x: 0, y: 0, width, height: gy },
       { x: 0, y: gy + h, width, height: height - gy - h },
@@ -922,7 +922,7 @@
       const handle = new Konva.Circle({
         x: box.x + s.points[vi] * box.scale,
         y: box.y + s.points[vi + 1] * box.scale,
-        radius: r, fill: '#161e2e', stroke: '#e8a33d', strokeWidth: 2 / stage.scaleX(),
+        radius: r, fill: '#252525', stroke: '#e8a33d', strokeWidth: 2 / stage.scaleX(),
         draggable: true, name: 'endh',
       });
       const apply = (commit) => {
@@ -976,7 +976,7 @@
       });
       g.add(new Konva.Rect({
         width: s, height: s, cornerRadius: 6 / k,
-        fill: '#161e2e', stroke: '#e8a33d', strokeWidth: 1.5 / k,
+        fill: '#252525', stroke: '#e8a33d', strokeWidth: 1.5 / k,
       }));
       g.add(new Konva.Text({
         width: s, height: s, text: b.glyph, fontSize: 15 / k, fill: TEXT_MAIN,
@@ -1414,7 +1414,7 @@
     try {
       const blob = await (await fetch(exportPng())).blob();
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      toast('Proof image copied — paste it anywhere', 'ok');
+      toast('Proof image copied. Paste it anywhere', 'ok');
     } catch (e) {
       toast(`Could not copy image: ${e.message}`, 'danger');
     } finally {
@@ -1437,7 +1437,7 @@
       savedName = result.name;
       dirty = false;
       await reloadCase();
-      toast(`Proof saved — ${result.png}`, 'ok');
+      toast(`Proof saved: ${result.png}`, 'ok');
       if (andPost) {
         uiState.postProof = {
           title: proof.title,
@@ -1457,6 +1457,19 @@
 
   async function openProofList() {
     openList = await api.get(`/api/cases/${caseState.current.id}/proofs`);
+  }
+
+  let deleteEntry = $state(null); // open-list entry pending deletion
+  async function deleteSavedProof() {
+    const entry = deleteEntry;
+    deleteEntry = null;
+    try {
+      await api.del(`/api/cases/${caseState.current.id}/proofs/${entry.name}`);
+      await Promise.all([openProofList(), reloadCase()]);
+      toast(`Deleted "${entry.title}"`, 'info');
+    } catch (e) {
+      toast(e.message, 'danger');
+    }
   }
 
   async function openProof(entry) {
@@ -1667,12 +1680,9 @@
         <div class="empty overlay-empty">
           <div class="empty-icon"><Icon name="proof" size={42} /></div>
           <h3>Compose a proof</h3>
-          <p>
-            Add panels — frames, photos, satellite crops — then draw colored shapes to match
-            features. <strong>Same color = same feature</strong> across panels.
-          </p>
-          <button class="btn btn-primary" onclick={openPicker}>
-            <Icon name="plus" size={15} /> Add your first panel
+          <p>Add panels, then mark matching features in the same color.</p>
+          <button class="btn" onclick={openPicker}>
+            <Icon name="plus" size={15} /> Add panel
           </button>
         </div>
       {/if}
@@ -1814,7 +1824,7 @@
             >{i + 1}</button>
             <input
               class="input comment-input"
-              placeholder={`Feature ${i + 1} — legend text…`}
+              placeholder={`Feature ${i + 1} legend…`}
               bind:value={proof.notes[c]}
               onchange={() => (dirty = true)}
             />
@@ -1898,7 +1908,7 @@
         <!-- Advanced: text sizes + editable footer (the trickier knobs) -->
         <button class="adv-toggle" onclick={() => (advancedOpen = !advancedOpen)} style="margin-top: 14px">
           <Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-          Advanced — text &amp; footer
+          Advanced: text &amp; footer
         </button>
         {#if advancedOpen}
           <div class="adv-body">
@@ -1950,11 +1960,24 @@
   />
 {/if}
 
+{#if deleteEntry}
+  <ConfirmDialog
+    title="Delete this proof?"
+    message={`“${deleteEntry.title}” will be removed from the case.`}
+    detail="This permanently deletes the exported PNG and its editable spec. It cannot be undone."
+    confirmLabel="Delete"
+    tone="danger"
+    icon="trash"
+    onconfirm={deleteSavedProof}
+    oncancel={() => (deleteEntry = null)}
+  />
+{/if}
+
 {#if picker}
   <Modal title="Add a panel" onclose={() => (picker = false)} width="720px">
     {#if !pickerItems.length}
       <div class="empty">
-        <p>No images in this case yet — import media or capture satellite imagery first.</p>
+        <p>No images in this case yet. Import media or capture satellite imagery first.</p>
       </div>
     {:else}
       <div class="pick-grid">
@@ -1985,15 +2008,20 @@
     {:else}
       <div class="open-list">
         {#each openList as entry (entry.name)}
-          <button class="open-row" onclick={() => openProof(entry)}>
-            {#if entry.png}
-              <img src={`/files/${caseState.current.id}/${entry.png}`} alt="" loading="lazy" />
-            {/if}
-            <div class="open-meta">
-              <span class="open-title">{entry.title}</span>
-              <span class="open-sub">{entry.panels} panels · {entry.shapes} annotations · {entry.updated_at?.slice(0, 10)}</span>
-            </div>
-          </button>
+          <div class="open-row-wrap">
+            <button class="open-row" onclick={() => openProof(entry)}>
+              {#if entry.png}
+                <img src={`/files/${caseState.current.id}/${entry.png}`} alt="" loading="lazy" />
+              {/if}
+              <div class="open-meta">
+                <span class="open-title">{entry.title}</span>
+                <span class="open-sub">{entry.panels} panels · {entry.shapes} annotations · {entry.updated_at?.slice(0, 10)}</span>
+              </div>
+            </button>
+            <button class="btn btn-ghost btn-sm open-del" title="Delete this saved proof" onclick={() => (deleteEntry = entry)}>
+              <Icon name="trash" size={13} />
+            </button>
+          </div>
         {/each}
       </div>
     {/if}
@@ -2032,7 +2060,7 @@
     color: var(--text-3);
   }
   .tb-btn:hover { color: var(--text-1); background: var(--bg-2); }
-  .tb-btn.active { color: var(--accent); background: var(--accent-soft); }
+  .tb-btn.active { color: var(--text-1); background: var(--bg-3); }
   .tb-guide { font-size: 11px; font-weight: 700; }
   .tb-magic:not(:disabled) { color: var(--accent); }
   .tb-magic:not(:disabled):hover { background: var(--accent-soft); }
@@ -2048,10 +2076,12 @@
     height: 22px;
     border-radius: 50%;
     border: 2px solid transparent;
-    transition: transform 0.12s var(--ease);
+    transition: border-color 0.12s var(--ease);
     flex-shrink: 0;
   }
-  .color-btn:hover { transform: scale(1.15); }
+  .color-btn:hover {
+    border-color: var(--text-3);
+  }
   .color-btn.active {
     border-color: var(--text-1);
     box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--text-3);
@@ -2060,7 +2090,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    color: #0b0f17;
+    color: var(--accent-text);
     cursor: pointer;
     position: relative;
     overflow: hidden;
@@ -2096,7 +2126,7 @@
     padding: 0 2px;
     font-family: system-ui, sans-serif;
     font-weight: 700;
-    background: rgba(9, 12, 20, 0.85);
+    background: rgba(14, 14, 14, 0.85);
     border: 1px dashed var(--accent);
     border-radius: 2px;
     outline: none;
@@ -2199,11 +2229,11 @@
     top: 5px;
     left: 5px;
     padding: 1px 6px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     font-size: 10px;
     font-weight: 700;
     color: var(--text-1);
-    background: rgba(9, 12, 20, 0.72);
+    background: rgba(14, 14, 14, 0.72);
   }
   .adv-toggle {
     display: flex;
@@ -2301,7 +2331,7 @@
     flex-shrink: 0;
     font-size: 11px;
     font-weight: 700;
-    color: #0b0f17;
+    color: var(--accent-text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -2376,6 +2406,9 @@
     white-space: nowrap;
   }
   .open-list { display: flex; flex-direction: column; gap: 8px; }
+  .open-row-wrap { display: flex; align-items: center; gap: 4px; }
+  .open-row-wrap .open-row { flex: 1; min-width: 0; }
+  .open-del { color: var(--danger); flex-shrink: 0; }
   .open-row {
     display: flex;
     gap: 12px;

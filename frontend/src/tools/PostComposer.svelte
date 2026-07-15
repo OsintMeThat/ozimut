@@ -312,7 +312,7 @@
       let blob = await res.blob();
       if (blob.type !== 'image/png') blob = await toPngBlob(blob);
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-      toast('Image copied — paste it into X (Ctrl+V)', 'ok', 2400);
+      toast('Image copied. Paste it into X (Ctrl+V)', 'ok', 2400);
     } catch (e) {
       toast(`Could not copy image: ${e.message}`, 'danger');
     }
@@ -326,7 +326,7 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    toast('Downloaded — drag it into X', 'info', 2600);
+    toast('Downloaded. Drag it into X', 'info', 2600);
   }
 
   // ---- draft persistence --------------------------------------------------
@@ -377,6 +377,19 @@
     if (!caseState.current) return;
     try {
       openList = await api.get(`/api/cases/${caseState.current.id}/drafts`);
+    } catch (e) {
+      toast(e.message, 'danger');
+    }
+  }
+
+  let deleteEntry = $state(null); // open-list entry pending deletion
+  async function deleteSavedDraft() {
+    const entry = deleteEntry;
+    deleteEntry = null;
+    try {
+      await api.del(`/api/cases/${caseState.current.id}/drafts/${entry.name}`);
+      await Promise.all([openDraftList(), reloadCase()]);
+      toast(`Deleted "${entry.title}"`, 'info');
     } catch (e) {
       toast(e.message, 'danger');
     }
@@ -450,7 +463,7 @@
     await copyAll();
     const url = `https://x.com/intent/post?text=${encodeURIComponent(bidiSafe(tweet1))}`;
     window.open(url, '_blank', 'noopener,noreferrer');
-    toast('Opened X — thread copied for the replies', 'info', 3200);
+    toast('Opened X. Thread copied for the replies', 'info', 3200);
   }
 </script>
 
@@ -458,7 +471,6 @@
   <div class="tool-header">
     <div class="head-text">
       <h2>Post Composer</h2>
-      <span class="sub">publishable post from your proof — you copy, you publish, Azimut never posts</span>
     </div>
     <div class="head-actions">
       {#if caseState.current}
@@ -740,16 +752,34 @@
     {:else}
       <div class="open-list">
         {#each openList as entry (entry.name)}
-          <button class="open-row" onclick={() => loadDraft(entry.name)}>
-            <div class="open-meta">
-              <span class="open-title">{entry.title}</span>
-              <span class="open-sub">{entry.updated_at?.slice(0, 10)}</span>
-            </div>
-          </button>
+          <div class="open-row-wrap">
+            <button class="open-row" onclick={() => loadDraft(entry.name)}>
+              <div class="open-meta">
+                <span class="open-title">{entry.title}</span>
+                <span class="open-sub">{entry.updated_at?.slice(0, 10)}</span>
+              </div>
+            </button>
+            <button class="btn btn-ghost btn-sm open-del" title="Delete this saved draft" onclick={() => (deleteEntry = entry)}>
+              <Icon name="trash" size={13} />
+            </button>
+          </div>
         {/each}
       </div>
     {/if}
   </Modal>
+{/if}
+
+{#if deleteEntry}
+  <ConfirmDialog
+    title="Delete this draft?"
+    message={`“${deleteEntry.title}” will be removed from the case.`}
+    detail="This permanently deletes the saved draft. It cannot be undone."
+    confirmLabel="Delete"
+    tone="danger"
+    icon="trash"
+    onconfirm={deleteSavedDraft}
+    oncancel={() => (deleteEntry = null)}
+  />
 {/if}
 
 {#if discardConfirm}
@@ -768,7 +798,7 @@
 {#if pickerOpen}
   <Modal title="Choose a media" width="640px" onclose={() => (pickerOpen = false)}>
     {#if mediaLibrary.length === 0}
-      <p class="picker-empty">No media in this case yet — import or download some in the Media tab.</p>
+      <p class="picker-empty">No media in this case yet. Import or download some in the Media tab.</p>
     {:else}
       <div class="picker-grid">
         {#each (caseState.current ? mediaLibrary : []) as item (item.path)}
@@ -792,7 +822,7 @@
 {#if proofPickerOpen}
   <Modal title="Attach a proof" width="640px" onclose={() => (proofPickerOpen = false)}>
     {#if proofLibrary.length === 0}
-      <p class="picker-empty">No proofs in this case yet — build one in the Proof tab.</p>
+      <p class="picker-empty">No proofs in this case yet. Build one in the Proof tab.</p>
     {:else}
       <div class="picker-grid">
         {#each (caseState.current ? proofLibrary : []) as item (item.name)}
@@ -1041,6 +1071,9 @@
     white-space: nowrap;
   }
   .open-list { display: flex; flex-direction: column; gap: 8px; }
+  .open-row-wrap { display: flex; align-items: center; gap: 4px; }
+  .open-row-wrap .open-row { flex: 1; min-width: 0; }
+  .open-del { color: var(--danger); flex-shrink: 0; }
   .open-row {
     display: flex;
     gap: 12px;

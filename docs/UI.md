@@ -1,92 +1,93 @@
-# Azimut — UI direction & information architecture
+# Azimut — UI & UX reference
 
-Status: **direction v1** (2026-07-15). Companion to [SPEC.md](SPEC.md) §6–7 — the
-spec says *what* tools exist; this doc says *where they live on screen* and *what
-they look like*. Nothing here is implemented yet; rollout order at the bottom.
+How the interface is organized (UX) and styled (UI). This is the contract new
+tools and future agents follow — not a roadmap. Feature phasing lives in
+[SPEC.md](SPEC.md).
 
-## 1. The two problems
+## Layout anatomy
 
-1. **Look & feel**: the current skin is the generic "AI dashboard" — navy-blue
-   dark theme, glowing accents, display font, rounded floating cards, marketing
-   copy in the chrome. It undermines trust in a tool for evidence work.
-2. **Scale**: a flat left rail works at 5 tools. The spec promises ~20 more
-   (v2–v4). A flat rail of 25 entries is the GIMP-toolbox failure mode: tools
-   mixed together, no visible order, nobody knows where to click next.
+```
+┌ topbar: rose+wordmark · case switcher · (spacer) · settings gear · sidebar toggle ┐
+├ rail ┬ tab strip (only when the workspace has several tools) ┬ case sidebar ┤
+│      │ tool canvas                                           │              │
+└──────┴───────────────────────────────────────────────────────┴──────────────┘
+```
 
-## 2. Design direction — the "pro desk" look
+## Workspace model (UX)
 
-Reference points our users already trust: QGIS, Google Earth Pro, DaVinci
-Resolve, Lightroom, Obsidian. Dense, flat, sober instruments — not SaaS
-landing pages. Everything is tokenized in `frontend/src/app.css`, so this is a
-token + shared-primitives pass, not a rewrite.
+The rail holds a **fixed set of activity workspaces in investigation-pipeline
+order**. Tools are tabs inside a workspace — **a new tool never adds a rail
+entry**; it registers in `frontend/src/lib/workspaces.js`.
 
-| Element | Today (AI tell) | Target |
+| Workspace | Tools today | Future tools land here |
 |---|---|---|
-| Font | Oxanium display, uppercase, 0.22em tracking | One workhorse UI font everywhere (system stack or Inter); mono for data (coords, hashes — already good, keep) |
-| Palette | Blue-tinted navy + amber + glows | Neutral gray dark theme; **one** accent reserved for selection & the primary action only; no glow, ever |
-| Shape | 6/10/14px radii, floating cards, pill badges | 2–4px radii, flat panels with visible splitters, rectangular badges |
-| Density | Card grids, generous padding | Dense rows, tighter spacing, list + grid toggle where cards exist |
-| Type hierarchy | Everything 600, uppercase micro-labels | Few weights; hierarchy by size and placement, not boldness |
-| Motion | fade-up, hover lifts | None — instant state changes |
-| Copy | Tagline in topbar, instructional italics in panels | No slogans in chrome (tagline → README/About); affordances discoverable, not explained in prose |
-| Rail | 76px icon-above-label buttons (mobile pattern) | Compact workspace rail, tooltips (see §3) |
-
-## 3. Information architecture — workspaces, not a tool list
-
-**Principle: the rail holds a fixed, small set of *workspaces* named by
-activity, in investigation-pipeline order. Tools ship as tabs/modes *inside*
-a workspace — never as new rail entries.** (DaVinci Resolve "pages" model:
-few pages in workflow order, media pool persistent across all of them.)
-
-The spec has already been converging on this organically — Frame Extractor and
-Panorama folded into Inspect, ELA into its Analyze fold-out, Reverse Search
-into Media Library, reference viewers into Satellite. This formalizes it.
-
-| Workspace | Today | Future tools land here as tabs/modes |
-|---|---|---|
-| **Collect** | Media Library (import, URL download) | Reverse Search launcher, Channel Monitor, Evidence Locker, archive-on-download |
-| **Examine** | Inspect (Selection / Frame / Collage / Analyze) | EXIF & Metadata, OCR, Image Compare, Manipulation Hints, Shadow Clock, audio analysis, auto-panorama |
-| **Map** | Satellite | **One persistent map, many modes**: Capture, Satellite Compare, Ground Imagery, Coordinates, Measures, Viewshed, OSM Query, Map Board pins/layers |
+| **Collect** | Media Library | Reverse Search, Channel Monitor, Evidence Locker |
+| **Examine** | Inspect (Selection / Frame / Collage / Analyze) | EXIF, OCR, Image Compare, Hints, Shadow Clock, audio |
+| **Map** | Satellite | **one map, many modes**: Compare, Ground Imagery, Coordinates, Measures, Viewshed, OSM Query, Map Board |
 | **Compose** | Proof Composer, Post Composer | Report Builder, GIF maker |
-| **Case** | (sidebar only) | Notes, Case Board / Relations, Timeline, Search Orchestrator |
+| *(Case)* | — sidebar covers it | v3: Notes, Relations, Timeline, Orchestrator |
 
-Rules that keep it sane:
+Rules:
 
-- **Max two levels.** Workspace → tab. Never deeper. Preserves SPEC principle 3
-  ("one tool, useful in 30 seconds").
-- **One Map.** Eight of the planned tools are "the map + a mode or layer".
-  They are modes of a single map workspace (Google Earth model), sharing
-  center/zoom/provider state — never separate rail entries.
-- **One media viewer.** The Examine analyzers are panels over the currently
-  open media, like Analyze already is.
-- **Deep links target tabs** (`#map/capture`, `#examine/exif`), extending the
-  existing `#satellite`-style scheme.
-- **Command palette (Ctrl+K)** — "capture satellite", "open EXIF" — the
-  escape hatch that keeps 20+ tools one keystroke away.
-- **Navigation follows the object too**: from any media — "Examine", "Locate
-  on map", "Add to proof"; the derivation-chain breadcrumb (SPEC §7) is the
-  connective tissue. The rail is for starting; objects are for continuing.
+- **Max two levels** (workspace → tab), preserving SPEC principle 3.
+- **`uiState.tool` is the single source of truth**; the active workspace is
+  derived from it, so cross-tool handoffs (`uiState.tool = 'proof'`) never
+  care about workspaces. Clicking a workspace returns to its last-used tab.
+- **Deep links**: `#<tool>` (stable), `#<workspace>`, `#<workspace>/<tool>`.
+- **Navigation follows the object too**: from any artifact — open in tool,
+  locate on map, add to proof. The rail is for starting; objects continue.
+- Settings is app plumbing: behind the topbar gear, not on the rail.
 
-## 4. Sidebar consolidation
+## Case sidebar
 
-Today the same items appear in three taxonomies: Media Library facets, Saved
-Work grouped by producing tool, and My Work folders. Under the workspace
-model, each workspace lists its own artifacts, so the case sidebar slims to:
+Four sections; tools list (and delete) their own saved artifacts via their
+Open lists / shelves — the sidebar never duplicates a by-tool listing.
 
-- **Notes** (unchanged)
-- **My Work** — the analyst's folders (the only user-owned taxonomy)
-- **Selection details** — provenance / derivation chain / entity editor for
-  whatever is selected anywhere in the app
+- **Case Notes** — `notes.md`.
+- **Suggestions** — tool-suggested entities; confirm or dismiss (only shown
+  when non-empty).
+- **My work** — every saved artifact: the analyst's nested folders (the only
+  user-owned taxonomy) plus an **Unfiled** inbox for the rest. File by
+  dragging a row onto a folder or from the details panel (folder field).
+  Unfiling deletes nothing.
+- **Details** — selection editor for any artifact: preview, title/notes,
+  provenance (created by/at, source), My-work folder, open-in-tool /
+  open-file / go-to-coords, Delete everywhere (danger confirm).
 
-Saved-work-grouped-by-tool disappears as a duplicate view once each workspace
-shows its own output.
+## Visual language (UI)
 
-## 5. Rollout
+Tokens live in `frontend/src/app.css`; components never hardcode colors.
+Reference points: QGIS, Google Earth Pro, Resolve, Lightroom — dense, flat,
+sober instruments.
 
-1. **Token pass** — fonts, radii, density, neutral palette, kill
-   tagline/animations. No logic changes.
-2. **Workspace shell** — rail → 5 workspaces with tab strips; mostly moving
-   existing components (Inspect is already internally tabbed — it's the
-   template). Deep links extended.
-3. **Sidebar consolidation** (with or after step 2).
-4. **Command palette** — once tool count justifies it.
+- **Type**: one workhorse font (system stack); mono for data (coords, hashes,
+  dates); few weights; uppercase micro-labels only as panel-section headers.
+- **Palette**: neutral gray darks (`--bg-0…3`), white-alpha borders, muted
+  status colors. **One accent (azimuth amber), three roles only**: the single
+  primary action per view, selection (picker borders, focus rings), and 2px
+  active-edge indicators on rail/tabs. Never as a background wash, never as
+  decoration, no glows.
+- **Shape**: radii 3/4/6px, flat panels with 1px borders, rectangular badges.
+- **Motion**: none. Color-only transitions ≤0.15s; no entrance animations,
+  no hover lifts. Transient functional feedback (locate-flash) is the one
+  exception.
+- **Copy**: no slogans or self-explanation in chrome; empty states are one
+  short sentence; **no em-dashes in visible UI strings** (use `·`, `:`, or a
+  period; hover tooltips are tolerated); "(one-shot mode)" style parentheses
+  over dash suffixes.
+- **Brand**: compass rose (`Logo.svelte`) + vector wordmark
+  (`Wordmark.svelte`), both extracted from
+  `frontend/src/assets/logo-source.svg`; favicon derives from the same rose.
+  No other place uses brand lettering.
+
+## Adding a tool (checklist for future agents)
+
+1. Add the component under `frontend/src/tools/`, register it in
+   `App.svelte`'s `TOOLS` and in its workspace's `tools` array
+   (`lib/workspaces.js`) — rail and deep links follow automatically.
+2. Consume tokens and shared primitives (`.btn`, `.input`, `.card`,
+   `.tool-header`); respect the accent roles above.
+3. The tool owns its artifacts: list, reopen and delete them in-tool; file
+   entities with provenance so Suggestions/Details work.
+4. Tests accompany the tool (repo rule); pure logic goes in `lib/` with a
+   `.test.js`.

@@ -33,7 +33,7 @@
   onclick={(e) => e.target === e.currentTarget && oncancel?.()}
   role="presentation"
 >
-  <div class="dialog fade-up" class:danger={tone === 'danger'} role="alertdialog" aria-label={title}>
+  <div class="dialog" class:danger={tone === 'danger'} role="alertdialog" aria-label={title}>
     <div class="head">
       <span class="badge" class:danger={tone === 'danger'}>
         <Icon name={icon} size={18} />
@@ -95,9 +95,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: 10px;
-    background: var(--accent-soft);
-    color: var(--accent);
+    border-radius: var(--r-md);
+    background: var(--bg-2);
+    color: var(--text-2);
   }
   .badge.danger {
     background: color-mix(in srgb, var(--danger, #e5484d) 16%, transparent);

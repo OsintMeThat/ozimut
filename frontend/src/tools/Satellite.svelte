@@ -353,7 +353,7 @@
   // tab — can't do anything visible while the map owns the whole screen, so
   // they're greyed out rather than silently dropping the user out of it.
   const leavesFullscreen = $derived(
-    fullscreen ? 'Exit fullscreen first — this leaves the map' : null
+    fullscreen ? 'Exit fullscreen first. This leaves the map' : null
   );
 
   // --- fullscreen (item 5) ---
@@ -455,7 +455,7 @@
   const MEASURE_HINT = {
     distance: 'Click points along the path',
     area: 'Click the polygon corners',
-    angle: 'Click three points — vertex second',
+    angle: 'Click three points (vertex second)',
   };
 
   // --- external map links (item 6) ---
@@ -618,7 +618,7 @@
       map.setView([place.lat, place.lon], Math.max(map.getZoom(), 13));
       if (place.display_name) toast(place.display_name, 'info', 5000);
     } catch {
-      toast('No match — try coordinates ("50.4501, 30.5234"), DMS, or a place name', 'danger');
+      toast('No match. Try coordinates ("50.4501, 30.5234"), DMS, or a place name', 'danger');
     } finally {
       searching = false;
     }
@@ -906,7 +906,7 @@
         bearing,
       });
       await reloadCase();
-      toast('Place saved — find it in the case sidebar', 'ok');
+      toast('Place saved. Find it in the case sidebar', 'ok');
     } catch (e) {
       toast(`Could not save place: ${e.message}`, 'danger', 6000);
     } finally {
@@ -1092,7 +1092,6 @@
 <div class="tool" class:fullscreen bind:this={toolEl}>
   <div class="tool-header">
     <h2>Satellite</h2>
-    <span class="sub">pan to a point, capture a sourced imagery crop</span>
     <div class="spacer"></div>
     <form
       class="go-form"
@@ -1579,7 +1578,7 @@
             {:else}
               <div class="place-list">
                 {#each places as p (p.id)}
-                  <div class="place-row card fade-up">
+                  <div class="place-row card">
                     <div class="place-main">
                       <button
                         type="button"
@@ -1639,7 +1638,7 @@
             {:else}
               <div class="cap-list">
               {#each (caseState.current ? captures : []) as item (item.path)}
-                <div class="cap card fade-up">
+                <div class="cap card">
                   <a
                     class="cap-goto"
                     class:disabled={fullscreen}
@@ -1899,7 +1898,7 @@
     left: 50%;
     transform: translate(-50%, -50%);
     border: 1px dashed rgba(255, 255, 255, 0.55);
-    box-shadow: 0 0 0 100vmax rgba(8, 11, 18, 0.28);
+    box-shadow: 0 0 0 100vmax rgba(12, 12, 12, 0.28);
     pointer-events: none;
     z-index: 450;
   }
@@ -1961,7 +1960,7 @@
     transform: translateX(-50%);
     z-index: 600;
     display: flex;
-    background: rgba(16, 22, 35, 0.88);
+    background: rgba(24, 24, 24, 0.88);
     backdrop-filter: blur(6px);
   }
   .hud-coords {
@@ -1989,10 +1988,10 @@
     align-items: center;
     gap: 5px;
     padding: 3px 8px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     font-size: var(--fs-xs);
     color: var(--text-3);
-    background: rgba(16, 22, 35, 0.7);
+    background: rgba(24, 24, 24, 0.7);
     backdrop-filter: blur(6px);
     pointer-events: none;
   }
@@ -2022,7 +2021,7 @@
     display: flex;
     gap: 2px;
     padding: 4px;
-    background: rgba(16, 22, 35, 0.88);
+    background: rgba(24, 24, 24, 0.88);
     backdrop-filter: blur(6px);
   }
   .mtbtn {
@@ -2061,7 +2060,7 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px;
-    background: rgba(16, 22, 35, 0.92);
+    background: rgba(24, 24, 24, 0.92);
     backdrop-filter: blur(6px);
     box-shadow: var(--shadow-2);
   }
@@ -2101,7 +2100,7 @@
   .sel-rect {
     position: absolute;
     border: 1.5px dashed var(--accent);
-    box-shadow: 0 0 0 100vmax rgba(8, 11, 18, 0.28);
+    box-shadow: 0 0 0 100vmax rgba(12, 12, 12, 0.28);
     pointer-events: none;
     z-index: 460;
   }
@@ -2140,7 +2139,7 @@
     /* round translucent backing disc so the rose reads clearly over any
        imagery — same fill as the degree readout below (item 3) */
     border-radius: 50%;
-    background: rgba(16, 22, 35, 0.88);
+    background: rgba(24, 24, 24, 0.88);
     backdrop-filter: blur(6px);
     box-shadow: var(--shadow-1);
   }
@@ -2168,7 +2167,7 @@
     border-radius: var(--radius-1);
     font-size: var(--fs-xs);
     color: var(--text-1);
-    background: rgba(16, 22, 35, 0.88);
+    background: rgba(24, 24, 24, 0.88);
     backdrop-filter: blur(6px);
     cursor: text;
   }
@@ -2191,7 +2190,7 @@
     align-items: center;
     gap: 10px;
     padding: 10px 12px;
-    background: rgba(16, 22, 35, 0.92);
+    background: rgba(24, 24, 24, 0.92);
     backdrop-filter: blur(6px);
     box-shadow: var(--shadow-2);
   }
@@ -2204,7 +2203,7 @@
     color: var(--text-3);
     background: var(--bg-2);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     padding: 3px 9px;
     white-space: nowrap;
   }
@@ -2223,7 +2222,7 @@
     color: var(--ok);
     background: var(--bg-2);
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     padding: 3px 9px;
     white-space: nowrap;
   }
@@ -2294,7 +2293,7 @@
     flex-direction: column;
     gap: 4px;
     padding: 12px;
-    background: rgba(16, 22, 35, 0.96);
+    background: rgba(24, 24, 24, 0.96);
     backdrop-filter: blur(6px);
     box-shadow: var(--shadow-2);
     z-index: 700;
@@ -2318,7 +2317,7 @@
   }
   .chip {
     padding: 4px 9px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     border: 1px solid var(--border);
     background: var(--bg-2);
     color: var(--text-2);
@@ -2667,7 +2666,7 @@
      each tile onto its own GPU layer and reintroduces the white seams the
      deSeamTiles() left/top positioning removes (see script). */
   :global(.leaflet-control-attribution) {
-    background: rgba(16, 22, 35, 0.85) !important;
+    background: rgba(24, 24, 24, 0.85) !important;
     color: var(--text-3) !important;
     font-size: 10px;
   }
@@ -2768,7 +2767,7 @@
     padding: 2px;
     border-radius: var(--radius-1);
     color: #fff;
-    background: rgba(11, 15, 23, 0.75);
+    background: rgba(16, 16, 16, 0.75);
     backdrop-filter: blur(4px);
   }
   .ref-pick:hover .ref-thumb {

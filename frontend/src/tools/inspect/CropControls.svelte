@@ -118,12 +118,12 @@
     font-size: var(--fs-xs);
   }
   .chip:hover:not(:disabled) {
-    border-color: var(--accent);
+    border-color: var(--border-strong);
   }
   .chip.on {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-soft);
+    border-color: var(--border-strong);
+    color: var(--text-1);
+    background: var(--bg-3);
   }
   .chip:disabled {
     opacity: 0.4;

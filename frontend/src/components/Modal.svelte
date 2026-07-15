@@ -17,7 +17,7 @@
   onclick={(e) => e.target === e.currentTarget && onclose?.()}
   role="presentation"
 >
-  <div class="modal fade-up" style:width role="dialog" aria-label={title}>
+  <div class="modal" style:width role="dialog" aria-label={title}>
     <header>
       <h3>{title}</h3>
       <button class="btn btn-ghost btn-sm" onclick={onclose} aria-label="Close">

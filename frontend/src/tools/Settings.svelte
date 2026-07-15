@@ -26,7 +26,7 @@
       usage: USAGE_LINKS.mapbox,
       unlocks: 'Mapbox Satellite basemap',
       overage:
-        'Beyond 200k free tiles/month, Mapbox bills extra tiles automatically ($0.50 per 1,000, pay-as-you-go — no hard cap available). Set a spending alert in your Mapbox account.',
+        'Beyond 200k free tiles/month, Mapbox bills extra tiles automatically ($0.50 per 1,000, pay-as-you-go, no hard cap). Set a spending alert in your Mapbox account.',
     },
     {
       id: 'google',
@@ -89,7 +89,7 @@
     try {
       await api.put('/api/settings/keys', { mapbox: keys.mapbox, google: keys.google });
       testResult = { mapbox: null, google: null }; // stale verdicts for new keys
-      toast('Keys saved — keyed basemaps now appear in the Satellite tab', 'ok');
+      toast('Keys saved. Keyed basemaps now appear in the Satellite tab', 'ok');
     } catch (e) {
       toast(`Could not save keys: ${e.message}`, 'danger');
     } finally {
@@ -117,7 +117,6 @@
 <div class="tool">
   <div class="tool-header">
     <h2>Settings</h2>
-    <span class="sub">API keys & usage — stored locally, never in a case export</span>
   </div>
 
   <div class="body">
@@ -193,7 +192,7 @@
     </section>
 
     <section class="card block">
-      <h3><Icon name="chart" size={15} /> Tile usage — {month}</h3>
+      <h3><Icon name="chart" size={15} /> Tile usage · {month}</h3>
       <p class="hint">
         Keyed providers bill per tile served. Azimut counts exactly what goes out to
         each provider (live map + captures, browser cache hits excluded), so this
@@ -269,7 +268,7 @@
     <section class="card block">
       <h3><Icon name="shield" size={15} /> Provider terms, encoded</h3>
       <ul class="rules">
-        <li>Google tiles are never cached to disk, and a Google capture is a flattened screenshot with the copyright line burned into its footer — both are conditions of Google's Map Tiles API terms.</li>
+        <li>Google tiles are never cached to disk, and a Google capture is a flattened screenshot with the copyright line burned into its footer; both are conditions of Google's Map Tiles API terms.</li>
         <li>Mapbox captures keep the © Mapbox © OpenStreetMap attribution in their provenance.</li>
         <li>Keys are never bundled into a shared case or export.</li>
       </ul>
@@ -393,7 +392,7 @@
   }
   .meter-track {
     height: 5px;
-    border-radius: 999px;
+    border-radius: var(--r-sm);
     background: var(--bg-2);
     border: 1px solid var(--border);
     overflow: hidden;
