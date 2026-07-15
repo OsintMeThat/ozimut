@@ -21,11 +21,26 @@ workbench: fix a direction, fix a location.*
 | **Media Library** | Import local files or download by URL (X, Telegram, TikTok, YouTube, Instagram… via yt-dlp, with a gallery-dl fallback for image-only posts) → clean local file + metadata + SHA-256. Multi-photo posts open a picker. |
 | **Inspect** | Scratch workspace over any photo/video: frame adjustments, editable crop, sharpest-frame capture, hand-made collage with per-piece warp/scale/rotate — nothing enters the case until you save. |
 | **Satellite** | Coordinates or place name → imagery crop, with select-area capture, map rotation, measurement tools, and reference-image overlays. Esri/OSM by default; add your own Mapbox/Google key for more basemaps (stored locally, never shared). |
-| **Proof Composer** | Compose panels side by side, annotate with colored shapes and text (same color = same feature), reorderable legend → export `proof.png` + a re-editable spec. |
+| **Proof Composer** | Compose panels in a grid or free layout, annotate with colored shapes and text (same color = same feature), reorderable legend → export `proof.png` + a re-editable spec. |
 | **Post Composer** | Turn a proof into a publishable thread: coordinates in all formats, plus code, attribution, character count, RTL-safe text. Copy-paste ready — Azimut never posts for you. |
 
 Every tool works **one-shot** (no setup, scratch session) or inside a **case**
 — a plain directory holding the whole investigation.
+
+**New in v0.1.1** — a polish pass over the v1 tools:
+
+- **Satellite** — OSM labels overlay, true browser fullscreen, Esri overzoom
+  (upscales past World Imagery's last level instead of a "not available" tile),
+  and imagery acquisition dates surfaced on the map and in captures.
+- **Keyed providers** — a Settings tab for Mapbox/Google keys with per-provider
+  toggles, monthly usage counters, a soft block at 90% of the free tier, an eco
+  mode that falls back to free imagery when zoomed out, and a disk tile cache.
+  Free by default: keys stay optional and local.
+- **Proof Composer** — free layout mode (drag panels anywhere, overlap with
+  z-order), corner-drag panel resize, and satellite panels that auto-caption
+  with provider · coordinates · imagery date.
+- **Inspect** — shift-click a block of collage pieces to move, scale and rotate
+  them as one.
 
 ## Install & run
 
