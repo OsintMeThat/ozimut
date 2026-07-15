@@ -1,6 +1,6 @@
 """REST API for app-wide settings: API keys and per-provider usage counters.
 
-Keys are the user's own billing identity (docs/KEYED_PROVIDERS.md §0): stored
+Keys are the user's own billing identity (docs/IMAGERY_PROVIDERS.md): stored
 locally in settings.json, app-wide (never per-case), never written into a case
 folder or export bundle. Usage counters are local bookkeeping only.
 """
@@ -29,6 +29,18 @@ class KeysIn(BaseModel):
     google: str | None = None
 
 
+class PrefsIn(BaseModel):
+    """Keyed-provider preferences — None leaves a field untouched."""
+
+    # {"mapbox": bool, "google": bool}: basemap on/off without touching the key
+    providers_enabled: dict[str, bool] | None = None
+    # {"mapbox": bool, ...}: keep serving past the 90% soft block (billed)
+    usage_overrides: dict[str, bool] | None = None
+    # swap billed basemaps for free imagery at low zoom (≤ eco_max_zoom)
+    eco_zoom_fallback: bool | None = None
+    eco_max_zoom: int | None = None  # clamped to a sane zoom range
+
+
 @router.get("/settings")
 def get_settings() -> dict[str, Any]:
     settings = config.load_settings()
@@ -36,6 +48,37 @@ def get_settings() -> dict[str, Any]:
         "api_keys": settings.get("api_keys", {}),
         "usage": settings.get("usage", {}),
         "month": config.month_key(),
+        "providers_enabled": settings.get("providers_enabled", {}),
+        "usage_overrides": settings.get("usage_overrides", {}),
+        "eco_zoom_fallback": bool(settings.get("eco_zoom_fallback", True)),
+        "eco_max_zoom": int(settings.get("eco_max_zoom", config.ECO_MAX_ZOOM)),
+        # server-side constants the UI mirrors
+        "free_tier": config.FREE_TIER,
+        "block_share": config.BLOCK_SHARE,
+    }
+
+
+@router.put("/settings/prefs")
+def put_prefs(body: PrefsIn) -> dict[str, Any]:
+    settings = config.load_settings()
+    if body.providers_enabled is not None:
+        merged = dict(settings.get("providers_enabled", {}))
+        merged.update({k: bool(v) for k, v in body.providers_enabled.items() if k in KEYED_PROVIDERS})
+        settings["providers_enabled"] = merged
+    if body.usage_overrides is not None:
+        merged = dict(settings.get("usage_overrides", {}))
+        merged.update({k: bool(v) for k, v in body.usage_overrides.items() if k in KEYED_PROVIDERS})
+        settings["usage_overrides"] = merged
+    if body.eco_zoom_fallback is not None:
+        settings["eco_zoom_fallback"] = bool(body.eco_zoom_fallback)
+    if body.eco_max_zoom is not None:
+        settings["eco_max_zoom"] = max(1, min(21, int(body.eco_max_zoom)))
+    config.save_settings(settings)
+    return {
+        "providers_enabled": settings.get("providers_enabled", {}),
+        "usage_overrides": settings.get("usage_overrides", {}),
+        "eco_zoom_fallback": bool(settings.get("eco_zoom_fallback", True)),
+        "eco_max_zoom": int(settings.get("eco_max_zoom", config.ECO_MAX_ZOOM)),
     }
 
 

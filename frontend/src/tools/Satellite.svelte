@@ -8,7 +8,13 @@
   import * as measure from '../lib/measure.js';
   import { dragBearing, pivotPanOffset } from '../lib/satRotate.js';
   import { SIZE_MIN, SIZE_MAX, clampSize, scaledCapture } from '../lib/captureSize.js';
-  import { monthCount, tilesShort } from '../lib/usage.js';
+  import {
+    monthCount,
+    tilesShort,
+    usageBlocked,
+    displayProviderId,
+    layerCell,
+  } from '../lib/usage.js';
   import { createViewer, nextZ, restack } from '../lib/refViewers.js';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
@@ -51,19 +57,27 @@
   const currentProvider = $derived(providers.find((p) => p.id === providerId));
   const baseIsImagery = $derived(currentProvider?.imagery ?? true);
   // view-only basemaps (capturable=false) keep the map but not the capture
-  // button (KEYED_PROVIDERS.md §4) — none built-in today, gate wired anyway
+  // button (IMAGERY_PROVIDERS.md) — none built-in today, gate wired anyway
   const captureBlocked = $derived(currentProvider?.capturable === false);
 
-  // --- keyed-provider usage (KEYED_PROVIDERS.md §6) ---
+  // --- keyed-provider usage (IMAGERY_PROVIDERS.md) ---
   // Metered tiles are proxied through the backend, which counts each one it
   // actually serves — this readout just mirrors settings.json.
   let usageTotals = $state({});
   let usageMonth = $state('');
+  // keyed-provider prefs mirrored from Settings: overrides lift the 90% soft
+  // block, eco swaps billed basemaps for free imagery when zoomed out
+  let usagePrefs = $state({ overrides: {}, eco: true, ecoMaxZoom: 15 });
   async function refreshUsage() {
     try {
       const s = await api.get('/api/settings');
       usageTotals = s.usage;
       usageMonth = s.month;
+      usagePrefs = {
+        overrides: s.usage_overrides ?? {},
+        eco: s.eco_zoom_fallback !== false,
+        ecoMaxZoom: s.eco_max_zoom ?? 15,
+      };
     } catch {
       /* readout only — never blocks the map */
     }
@@ -73,6 +87,32 @@
     currentProvider?.meter
       ? tilesShort(monthCount(usageTotals, currentProvider.meter, usageMonth))
       : null
+  );
+
+  // What the map actually shows: a billed basemap steps aside for free imagery
+  // when paused (90% soft block) or zoomed out (eco). Captures and the imagery
+  // date follow the display, so provenance always matches the pixels.
+  const meterBlocked = $derived(
+    currentProvider?.meter
+      ? usageBlocked(
+          monthCount(usageTotals, currentProvider.meter, usageMonth),
+          currentProvider.meter,
+          usagePrefs.overrides
+        )
+      : false
+  );
+  const displayedProviderId = $derived(
+    displayProviderId(currentProvider, center.zoom, {
+      eco: usagePrefs.eco,
+      blocked: meterBlocked,
+      ecoMaxZoom: usagePrefs.ecoMaxZoom,
+    })
+  );
+  const displayedProvider = $derived(providers.find((p) => p.id === displayedProviderId));
+  // memoized so the layer is only rebuilt when the cell actually changes
+  // (i.e. crossing the z17 boost bracket), not on every zoom step
+  const displayedCell = $derived(
+    displayedProvider ? layerCell(displayedProvider, center.zoom) : 256
   );
 
   // Acquisition date of the imagery under the crosshair — Esri only (item 2).
@@ -143,6 +183,7 @@
   }
 
   onMount(async () => {
+    refreshUsage(); // prefs drive the eco/soft-block fallbacks from the start
     providers = await api.get('/api/satellite/providers');
     // leaflet-rotate patches the global L, so expose it before importing.
     window.L = L;
@@ -195,6 +236,8 @@
 
   function onKeydown(e) {
     if (uiState.tool !== 'satellite' || e.key !== 'Escape') return;
+    // a dialog on top owns Escape — it closes itself, the map keeps its state
+    if (notesItem || placeModal || refPicker || deleteTarget) return;
     if (selectArmed) toggleSelect();
     else if (sizeMenuOpen) sizeMenuOpen = false;
     else if (measureMode) setMeasureMode(null);
@@ -236,7 +279,7 @@
     try {
       const r = await api.get(
         `/api/satellite/imagery-date?lat=${center.lat}&lon=${center.lon}` +
-          `&zoom=${center.zoom}&provider=${providerId}`
+          `&zoom=${center.zoom}&provider=${displayedProviderId}`
       );
       if (id === dateReqId) imageryDate = r;
     } catch {
@@ -249,7 +292,7 @@
     center.lat;
     center.lon;
     center.zoom;
-    providerId;
+    displayedProviderId;
     if (!mapReady) return;
     clearTimeout(dateTimer);
     dateTimer = setTimeout(refreshImageryDate, 500);
@@ -305,6 +348,13 @@
     if (Number.isFinite(v)) setBearing(v);
     editingBearing = false;
   }
+
+  // Actions that leave the tool — switching to another tool, opening a browser
+  // tab — can't do anything visible while the map owns the whole screen, so
+  // they're greyed out rather than silently dropping the user out of it.
+  const leavesFullscreen = $derived(
+    fullscreen ? 'Exit fullscreen first — this leaves the map' : null
+  );
 
   // --- fullscreen (item 5) ---
   // Prefer the real Fullscreen API — it covers the OS/browser chrome too, unlike
@@ -458,17 +508,34 @@
   }
 
   function setLayer() {
-    const p = providers.find((x) => x.id === providerId);
+    const p = displayedProvider;
     if (!p || !map) return;
-    // metered/keyed providers go through the backend tile proxy: the key and
-    // any session token stay server-side, and every billed tile is counted
-    // exactly once (browser cache hits never reach the proxy)
-    const url = p.meter ? `/api/tiles/${p.id}/{z}/{x}/{y}` : p.url;
+    // every provider goes through the backend tile proxy: keys and session
+    // tokens stay server-side, every billed tile is counted exactly once
+    // (browser cache hits never reach the proxy), cacheable providers share
+    // the disk tile cache, and coverage gaps come back overzoomed instead of
+    // as "not yet available" placards. Only {s} subdomain templates (custom
+    // providers) stay direct — the proxy can't expand those.
+    const url = p.url.includes('{s}') ? p.url : `/api/tiles/${p.id}/{z}/{x}/{y}`;
     const opts = { attribution: p.attribution, maxZoom: p.max_zoom };
-    if (p.tile_size === 512) {
-      // 512px tiles: same m/px at z-1, a quarter of the billed requests
-      opts.tileSize = 512;
-      opts.zoomOffset = -1;
+    // grid cell in CSS px (lib/usage.js layerCell): bigger tiles offset the
+    // URL z down (512 → -1, 1024 → -2); an oversample halves the cell so each
+    // tile is shown downscaled — deeper zoom on screen. Google's mid-zoom
+    // mosaics are genuinely softer than its deep ones (verified), so this is
+    // what makes the paid imagery actually look paid.
+    if (displayedCell !== 256 || p.tile_size > 256) {
+      opts.tileSize = displayedCell;
+      opts.zoomOffset = -Math.log2(displayedCell / 256);
+      opts.minNativeZoom = 0; // never ask for negative URL z at world zooms
+    }
+    if (p.meter) {
+      // billed tiles: skip the throwaway fetches Leaflet makes mid-zoom-animation
+      // (intermediate zoom levels that get discarded). Deliberately NOT
+      // updateWhenIdle: it delays sharp tiles until the map fully settles,
+      // leaving the scaled-up previous zoom (visible blur) on screen — and it
+      // saves nothing, since each visible tile is only ever fetched once.
+      opts.updateWhenZooming = false;
+      opts.keepBuffer = 4;
     }
     if (tileLayer) tileLayer.remove();
     tileLayer = L.tileLayer(url, opts).addTo(map);
@@ -481,8 +548,23 @@
   }
 
   $effect(() => {
-    providerId; // track provider changes
+    displayedProviderId; // track provider changes (incl. eco/block fallbacks)
+    displayedCell; // and the z17 detail-boost bracket
     setLayer();
+  });
+
+  // a basemap disabled in Settings can leave a stale selection — fall back
+  $effect(() => {
+    if (providers.length && !currentProvider) providerId = 'esri-world-imagery';
+  });
+
+  // re-sync providers + prefs when returning to this tab: Settings may have
+  // toggled a basemap off (it must vanish from the selector) or changed the
+  // eco / override prefs meanwhile (tools stay mounted, so no fresh onMount)
+  $effect(() => {
+    if (uiState.tool !== 'satellite' || !mapReady) return;
+    refreshUsage();
+    api.get('/api/satellite/providers').then((r) => (providers = r));
   });
 
   $effect(() => {
@@ -590,7 +672,7 @@
 
   // Output resolution: 1 = view zoom, 2 = one zoom deeper (2×), 'max' = provider max.
   let resolution = $state(1);
-  const providerMaxZoom = $derived(providers.find((p) => p.id === providerId)?.max_zoom ?? 19);
+  const providerMaxZoom = $derived(displayedProvider?.max_zoom ?? 19);
 
   // Single capture button, split-style: the main part re-runs whichever mode
   // was used last (remembered here); the arrow opens mode + size/ratio/
@@ -699,7 +781,8 @@
         zoom,
         width,
         height,
-        provider: providerId,
+        // capture what's on screen: the eco/soft-block fallback, if active
+        provider: displayedProviderId,
         bearing,
         marker_style: markerStyle,
         marker_x,
@@ -714,8 +797,10 @@
       toast(
         result.tiles_missing
           ? `Captured with ${result.tiles_missing} missing tile(s) — no imagery there`
-          : 'Satellite crop captured & filed',
-        result.tiles_missing ? 'warn' : 'ok'
+          : result.tiles_upscaled
+            ? `Captured — ${result.tiles_upscaled} tile(s) upscaled from a lower zoom (recorded in provenance)`
+            : 'Satellite crop captured & filed',
+        result.tiles_missing || result.tiles_upscaled ? 'warn' : 'ok'
       );
     } catch (e) {
       toast(`Capture failed: ${e.message}`, 'danger', 6000);
@@ -1255,6 +1340,18 @@
             title="Tiles requested from this billed provider this month — local counter, see Settings"
           >{usagePill}</span>
         {/if}
+        {#if currentProvider?.meter && displayedProviderId !== providerId}
+          <span
+            class="fallback-pill"
+            class:paused={meterBlocked}
+            title={meterBlocked
+              ? `${currentProvider.label} passed 90% of its monthly free tier — showing free imagery instead. Override in Settings to keep using it (billed).`
+              : `Eco mode: free imagery at low zoom — zoom in to get ${currentProvider.label} detail. Toggle in Settings.`}
+          >
+            <Icon name={meterBlocked ? 'alert' : 'leaf'} size={11} />
+            {meterBlocked ? `${currentProvider.label} paused — free imagery` : 'eco — free imagery'}
+          </span>
+        {/if}
         <select class="select" bind:value={markerStyle} title="Marker style">
           <option value="crosshair">✛ crosshair</option>
           <option value="pin">📍 pin</option>
@@ -1447,7 +1544,15 @@
           {#if linksOpen}
             <div class="links-grid">
               {#each externalLinks as l (l.id)}
-                <a class="ext-link" href={l.url} target="_blank" rel="noreferrer" title={l.url}>
+                <a
+                  class="ext-link"
+                  class:disabled={fullscreen}
+                  href={fullscreen ? undefined : l.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  aria-disabled={fullscreen}
+                  title={leavesFullscreen ?? l.url}
+                >
                   <Icon name="globe" size={13} />
                   <span>{l.label}</span>
                   <Icon name="external" size={12} />
@@ -1537,10 +1642,12 @@
                 <div class="cap card fade-up">
                   <a
                     class="cap-goto"
-                    href={`/files/${caseState.current.id}/${item.path}`}
+                    class:disabled={fullscreen}
+                    href={fullscreen ? undefined : `/files/${caseState.current.id}/${item.path}`}
                     target="_blank"
                     rel="noreferrer"
-                    title="Open the full image"
+                    aria-disabled={fullscreen}
+                    title={leavesFullscreen ?? 'Open the full image'}
                   >
                     <img
                       src={`/files/${caseState.current.id}/${item.path}`}
@@ -1574,17 +1681,20 @@
                     </button>
                     <button
                       class="btn btn-ghost btn-sm"
-                      title="Send to Proof Composer"
+                      disabled={fullscreen}
+                      title={leavesFullscreen ?? 'Send to Proof Composer'}
                       onclick={() => sendToComposer(item)}
                     >
                       <Icon name="proof" size={14} />
                     </button>
                     <a
                       class="btn btn-ghost btn-sm"
-                      href={`/files/${caseState.current.id}/${item.path}`}
+                      class:disabled={fullscreen}
+                      href={fullscreen ? undefined : `/files/${caseState.current.id}/${item.path}`}
                       target="_blank"
                       rel="noreferrer"
-                      title="Open"
+                      aria-disabled={fullscreen}
+                      title={leavesFullscreen ?? 'Open'}
                     >
                       <Icon name="external" size={14} />
                     </a>
@@ -1773,6 +1883,10 @@
     flex: 1;
     min-width: 0;
     overflow: hidden;
+    /* keep the map's z-index range (Leaflet panes/controls up to 1000, our own
+       clusters above them) to itself, so a dialog portalled into the fullscreen
+       tool still lands on top of it */
+    isolation: isolate;
   }
   .map {
     position: absolute;
@@ -2084,7 +2198,7 @@
   .capture-bar .select {
     width: auto;
   }
-  /* billed-provider tile counter (KEYED_PROVIDERS.md §6) — full readout in Settings */
+  /* billed-provider tile counter (IMAGERY_PROVIDERS.md) — full readout in Settings */
   .usage-pill {
     font-size: var(--fs-xs);
     color: var(--text-3);
@@ -2099,6 +2213,22 @@
     align-self: stretch;
     background: var(--border);
     margin: 0 2px;
+  }
+  /* eco / soft-block fallback: the billed basemap stepped aside for free imagery */
+  .fallback-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: var(--fs-xs);
+    color: var(--ok);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 9px;
+    white-space: nowrap;
+  }
+  .fallback-pill.paused {
+    color: var(--danger);
   }
   /* the capture split-button: main action + arrow fused into one pill,
      mirroring .place-save's main/edit split */
@@ -2371,9 +2501,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .ext-link:hover {
+  .ext-link:hover:not(.disabled) {
     color: var(--accent);
     border-color: var(--accent);
+  }
+  /* fullscreen: leaving for another tab would drop the map anyway (see
+     leavesFullscreen) */
+  .ext-link.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
   }
   .ext-link :global(svg:last-child) {
     color: var(--text-3);
@@ -2456,10 +2592,13 @@
     object-fit: cover;
     background: var(--bg-2);
   }
-  .cap-goto:hover img {
+  .cap-goto.disabled {
+    cursor: not-allowed;
+  }
+  .cap-goto:hover:not(.disabled) img {
     opacity: 0.9;
   }
-  .cap-goto:hover .coords {
+  .cap-goto:hover:not(.disabled) .coords {
     color: var(--accent);
   }
   .cap-meta {

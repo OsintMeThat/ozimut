@@ -1,4 +1,4 @@
-"""Settings persistence and back-compat merging (spec: docs/KEYED_PROVIDERS.md §1)."""
+"""Settings persistence and back-compat merging (spec: docs/IMAGERY_PROVIDERS.md)."""
 
 import json
 

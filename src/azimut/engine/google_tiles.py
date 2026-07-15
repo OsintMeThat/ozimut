@@ -1,4 +1,4 @@
-"""Google Map Tiles API session-token adapter (docs/KEYED_PROVIDERS.md §3).
+"""Google Map Tiles API session-token adapter (docs/IMAGERY_PROVIDERS.md).
 
 Google satellite tiles are not a static XYZ URL: a client first mints a
 short-lived *session token* (createSession), then requests standard slippy
@@ -25,7 +25,17 @@ CREATE_SESSION_URL = "https://tile.googleapis.com/v1/createSession"
 VIEWPORT_URL = "https://tile.googleapis.com/tile/v1/viewport"
 # mapType is part of the token's identity — a satellite session only serves
 # satellite tiles. Only this one kind is minted today.
-SESSION_BODY = {"mapType": "satellite", "language": "en-US", "region": "US"}
+# scale+highDpi make each tile 1024×1024 px instead of 256: one request covers
+# what sixteen would, and Google bills per request regardless of tile size.
+# Verified live (2026-07): the 4x hi-DPI imagery is pixel-identical to the
+# same area fetched as 256px tiles two zoom levels deeper.
+SESSION_BODY = {
+    "mapType": "satellite",
+    "language": "en-US",
+    "region": "US",
+    "scale": "scaleFactor4x",
+    "highDpi": True,
+}
 EXPIRY_SLACK = 60  # refresh this many seconds before the reported expiry
 
 _lock = threading.Lock()

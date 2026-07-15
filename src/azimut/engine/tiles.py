@@ -9,6 +9,7 @@ services.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -47,19 +48,28 @@ class Provider:
     cacheable: bool = True  # may its tiles be written to a disk cache?
     attribution_burn: bool = False  # force attribution stamped into the image
     session: str | None = None  # provider kind needing a live token, e.g. "google"
-    # usage-counter bucket in settings.json (docs/KEYED_PROVIDERS.md §6);
+    # usage-counter bucket in settings.json (docs/IMAGERY_PROVIDERS.md);
     # None = unmetered. Billed keyed providers count every tile request.
     meter: str | None = None
-    # px per tile edge. Mapbox bills 256px tiles 4× vs 512px ones (same imagery
-    # resolution: one 512 tile at z-1 = four 256 tiles at z), so keyed Mapbox
-    # uses 512. The visual zoom stays the caller's; the URL z is offset down.
+    # px per tile edge. Providers billing per request regardless of tile size
+    # get the biggest tile that keeps full imagery detail: Mapbox 512 (its @2x
+    # 1024 variant is upsampled — verified softer, not used), Google 1024
+    # (hi-DPI 4x, verified pixel-identical). The visual zoom stays the
+    # caller's; the URL z is offset down (512 → z-1, 1024 → z-2).
     tile_size: int = 256
+    # Live-map display oversampling: 2 = the map shows tiles from one zoom
+    # deeper, downscaled 2× in CSS. Google's mid-zoom mosaics are genuinely
+    # softer than its deep ones (verified 2026-07: z18-detail downscaled to a
+    # z16 footprint beats the native z16 tile), so the layer trades 4× the
+    # requests (still ¼ of plain 256px tiles) for crisp imagery. Captures are
+    # unaffected: they stay 1:1 provider pixels for evidential integrity.
+    oversample: int = 1
 
 
-# Built-in keyed providers (docs/KEYED_PROVIDERS.md §2): only surfaced from
+# Built-in keyed providers (docs/IMAGERY_PROVIDERS.md): only surfaced from
 # all_providers() once the matching api_keys entry is set. Mapbox's token is a
 # static credential baked straight into the URL; Google needs a live session
-# token minted per docs/KEYED_PROVIDERS.md §3, so {session} stays unresolved
+# token minted per docs/IMAGERY_PROVIDERS.md, so {session} stays unresolved
 # here and is substituted at fetch time (engine/google_tiles.py).
 MAPBOX_SATELLITE_URL = (
     "https://api.mapbox.com/styles/v1/mapbox/satellite-v9/tiles/512/{z}/{x}/{y}?access_token={key}"
@@ -89,8 +99,10 @@ def all_providers() -> list[Provider]:
     providers = list(BUILTIN_PROVIDERS)
     settings = config.load_settings()
     keys = settings.get("api_keys", {})
+    # a keyed basemap can be switched off in Settings without deleting the key
+    enabled = settings.get("providers_enabled", {})
 
-    mapbox_key = keys.get("mapbox")
+    mapbox_key = keys.get("mapbox") if enabled.get("mapbox", True) else None
     if mapbox_key:
         providers.append(
             Provider(
@@ -107,7 +119,7 @@ def all_providers() -> list[Provider]:
             )
         )
 
-    google_key = keys.get("google")
+    google_key = keys.get("google") if enabled.get("google", True) else None
     if google_key:
         providers.append(
             Provider(
@@ -124,6 +136,8 @@ def all_providers() -> list[Provider]:
                 attribution_burn=True,
                 session="google",
                 meter="google",
+                tile_size=1024,  # hi-DPI 4x session (engine/google_tiles.py)
+                oversample=2,  # mid-zoom mosaics are soft — show z+1 detail
             )
         )
 
@@ -194,6 +208,24 @@ class TileFetchError(Exception):
     pass
 
 
+# Some providers answer in-coverage-gap requests with a real HTTP-200 tile that
+# just says "no imagery": Esri World Imagery's constant "Map data not yet
+# available" JPEG (byte-identical everywhere, verified 2026-07). Matching by
+# content hash turns those into missing tiles, so the overzoom fallback can
+# fill them from the parent level instead of showing the gray placard.
+PLACEHOLDER_TILE_SHA256 = frozenset(
+    {"9eafd300d61393184a4abc1d458564cfd1cd9b6f9c4e9c74687045c0a0e5b858"}  # Esri
+)
+# How many parent zoom levels the overzoom fallback may climb. Three levels
+# means an 8× upscale at worst — soft, but it keeps the map usable where a
+# provider's coverage ends a level or two short.
+OVERZOOM_LEVELS = 3
+
+
+def is_placeholder_tile(content: bytes) -> bool:
+    return hashlib.sha256(content).hexdigest() in PLACEHOLDER_TILE_SHA256
+
+
 def resolve_url(provider: Provider) -> str:
     """The provider's live XYZ template — session token substituted if needed."""
     if provider.session != "google":
@@ -205,11 +237,14 @@ def resolve_url(provider: Provider) -> str:
 
 
 def _default_fetch(client: httpx.Client, url: str) -> Image.Image | None:
-    """Fetch one tile; None for 'no imagery here' (404), raise on other errors."""
+    """Fetch one tile; None for 'no imagery here' (404 or a known placeholder
+    tile), raise on other errors."""
     response = client.get(url)
     if response.status_code == 404:
         return None
     response.raise_for_status()
+    if is_placeholder_tile(response.content):
+        return None
     import io
 
     return Image.open(io.BytesIO(response.content)).convert("RGB")
@@ -249,6 +284,11 @@ def fetch_crop(
         raise TileFetchError(f"provider '{provider.id}' requires an API key (settings.json)")
     if not provider.capturable:
         raise TileFetchError(f"provider '{provider.id}' is view-only and cannot be captured")
+    if provider.meter and config.usage_blocked(provider.meter):
+        raise TileFetchError(
+            f"{provider.label} is paused: {int(config.BLOCK_SHARE * 100)}% of the monthly "
+            "free tier is used — enable the override in Settings to keep going (billed)"
+        )
     # Bigger tiles keep the caller's visual zoom (same m/px) but request a
     # lower URL z: one 512px tile at z-1 covers four 256px tiles at z.
     z_shift = int(math.log2(provider.tile_size // TILE_SIZE))
@@ -314,13 +354,30 @@ def fetch_crop(
                 raise
 
     served = 0  # tiles the provider actually returned — what a billed meter counts
+    gaps: list[tuple[int, int]] = []  # in-range tiles the provider had nothing for
     for tx, ty, tile in results:
         px, py = int(tx * ts - left), int(ty * ts - top)
         if tile is None:
             missing += 1
+            if 0 <= tx <= max_index and 0 <= ty <= max_index:
+                gaps.append((tx, ty))
             continue
         served += 1
         canvas.paste(tile, (px, py))
+
+    # overzoom fallback: fill coverage gaps from parent-level imagery, upscaled —
+    # soft beats a gray placeholder, and provenance records how many were faked up
+    upscaled = 0
+    if gaps:
+        try:
+            filled, parent_served = _overzoom_fill(resolve_url(provider), gaps, tile_z, ts, fetch)
+        except TileFetchError:
+            filled, parent_served = {}, 0
+        served += parent_served
+        for (tx, ty), tile in filled.items():
+            canvas.paste(tile, (int(tx * ts - left), int(ty * ts - top)))
+        upscaled = len(filled)
+        missing -= upscaled
     if provider.meter and served:
         config.record_usage(provider.meter, served)
 
@@ -375,6 +432,7 @@ def fetch_crop(
         "meters_per_pixel": round(meters_per_pixel(lat, zoom), 3),
         "tiles": n_tiles,
         "tiles_missing": missing,
+        "tiles_upscaled": upscaled,
         "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "marker_style": marker_style,
         "marker_x": int(marker_x),
@@ -383,6 +441,59 @@ def fetch_crop(
         "crosshair": marker_style != "none",
     }
     return canvas, provenance
+
+
+def _overzoom_fill(
+    url_template: str,
+    gaps: list[tuple[int, int]],
+    tile_z: int,
+    ts: int,
+    fetch: Callable[[httpx.Client, str], Image.Image | None],
+) -> tuple[dict[tuple[int, int], Image.Image], int]:
+    """Best-effort fill for missing tiles from parent-level imagery.
+
+    Climbs up to OVERZOOM_LEVELS levels; each needed parent is fetched exactly
+    once (adjacent gaps share parents — one billed request, not four) and every
+    child crops + upscales its own quadrant. Returns (filled tiles, number of
+    parent tiles the provider served — what a billed meter must count).
+    Individual fetch errors just leave tiles unfilled; never raises.
+    """
+    filled: dict[tuple[int, int], Image.Image] = {}
+    unresolved = list(gaps)
+    served = 0
+    with httpx.Client(
+        headers={"User-Agent": USER_AGENT}, timeout=20, follow_redirects=True
+    ) as client:
+        for up in range(1, OVERZOOM_LEVELS + 1):
+            sub = ts >> up  # the child's footprint inside its parent, in px
+            if not unresolved or tile_z - up < 0 or sub < 1:
+                break
+
+            def grab(pxy: tuple[int, int]) -> tuple[tuple[int, int], Image.Image | None]:
+                try:
+                    url = url_template.format(x=pxy[0], y=pxy[1], z=tile_z - up)
+                    return pxy, fetch(client, url)
+                except Exception:
+                    return pxy, None
+
+            wanted = list({(tx >> up, ty >> up) for tx, ty in unresolved})
+            with ThreadPoolExecutor(max_workers=6) as pool:
+                parents = dict(pool.map(grab, wanted))
+            served += sum(1 for img in parents.values() if img is not None)
+
+            still: list[tuple[int, int]] = []
+            mask = (1 << up) - 1
+            for tx, ty in unresolved:
+                parent = parents.get((tx >> up, ty >> up))
+                if parent is None:
+                    still.append((tx, ty))
+                    continue
+                qx, qy = (tx & mask) * sub, (ty & mask) * sub
+                filled[(tx, ty)] = parent.crop((qx, qy, qx + sub, qy + sub)).resize(
+                    (ts, ts), Image.Resampling.LANCZOS
+                )
+            unresolved = still
+    return filled, served
 
 
 # -- Esri imagery capture date (best-effort) ----------------------------------

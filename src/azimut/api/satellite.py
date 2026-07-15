@@ -8,10 +8,18 @@ from typing import Any
 import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from .. import config
-from ..engine import geo, google_tiles, media as media_engine, satellite as satellite_engine, tiles
+from ..engine import (
+    geo,
+    google_tiles,
+    media as media_engine,
+    satellite as satellite_engine,
+    tilecache,
+    tiles,
+)
 from ..workspace import CaseError
 from .cases import get_case
 
@@ -72,25 +80,26 @@ def providers() -> list[dict[str, Any]]:
             "session": p.session,
             "meter": p.meter,
             "tile_size": p.tile_size,
+            "oversample": p.oversample,
         }
         for p in tiles.all_providers()
     ]
 
 
-@router.get("/tiles/{provider_id}/{z}/{x}/{y}")
-def tile_proxy(provider_id: str, z: int, x: int, y: int) -> Response:
-    """Live-map tiles for keyed providers, proxied through the app.
+def _serve_tile(
+    provider: tiles.Provider, z: int, x: int, y: int
+) -> tuple[bytes, str, dict[str, str]] | Response | None:
+    """One tile: disk cache first (cacheable providers), then upstream.
 
-    Two reasons (docs/KEYED_PROVIDERS.md §3/§6): the API key and Google session
-    token never reach the browser, and the meter counts *exactly* what the
-    provider bills — one bump per tile actually served; a browser cache hit
-    never reaches this endpoint, so it never over-counts. Nothing is stored
-    server-side: the provider's own Cache-Control is passed through untouched.
+    Returns ``(content, media_type, headers)`` for a served tile, ``None`` when
+    the provider has no imagery there (404 or a known placeholder tile), or a
+    passthrough ``Response`` for any other upstream error. The meter counts
+    exactly what the provider billed: every upstream 2xx/3xx, never a cache hit.
     """
-    try:
-        provider = tiles.get_provider(provider_id)
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if provider.cacheable:
+        cached = tilecache.get(provider.id, z, x, y)
+        if cached:
+            return cached[0], cached[1], {"Cache-Control": "private, max-age=86400"}
 
     upstream: httpx.Response | None = None
     for attempt in (1, 2):
@@ -111,17 +120,83 @@ def tile_proxy(provider_id: str, z: int, x: int, y: int) -> Response:
             continue
         break
 
-    if provider.meter and upstream.status_code < 400:
+    if upstream.status_code == 404:
+        return None
+    if upstream.status_code >= 400:
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "image/png"),
+        )
+    if provider.meter:
         config.record_usage(provider.meter, 1)
+    if tiles.is_placeholder_tile(upstream.content):
+        return None  # billed above (the provider did serve it), but not imagery
+    media_type = upstream.headers.get("content-type", "image/png")
+    if provider.cacheable:
+        tilecache.put(provider.id, z, x, y, upstream.content, media_type)
     headers = {}
     if upstream.headers.get("cache-control"):
         headers["Cache-Control"] = upstream.headers["cache-control"]
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        media_type=upstream.headers.get("content-type", "image/png"),
-        headers=headers,
-    )
+    return upstream.content, media_type, headers
+
+
+@router.get("/tiles/{provider_id}/{z}/{x}/{y}")
+def tile_proxy(provider_id: str, z: int, x: int, y: int) -> Response:
+    """Live-map tiles for every provider, proxied through the app.
+
+    Why a proxy (docs/IMAGERY_PROVIDERS.md): API keys and the Google
+    session token never reach the browser; the meter counts *exactly* what a
+    billed provider serves (a browser cache hit never reaches this endpoint);
+    cacheable providers get the shared disk tile cache; and coverage gaps
+    (404s / "not yet available" placeholders) are overzoomed — the parent
+    tile's quadrant upscaled — instead of breaking the map.
+    """
+    try:
+        provider = tiles.get_provider(provider_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if provider.meter and config.usage_blocked(provider.meter):
+        raise HTTPException(
+            status_code=429,
+            detail=f"{provider.label} is paused: {int(config.BLOCK_SHARE * 100)}% of the "
+            "monthly free tier is used — enable the override in Settings to keep going",
+        )
+
+    served = _serve_tile(provider, z, x, y)
+    if isinstance(served, Response):
+        return served
+    if served is not None:
+        content, media_type, headers = served
+        return Response(content=content, media_type=media_type, headers=headers)
+
+    # no imagery at this zoom — climb parents and upscale the matching quadrant
+    import io
+
+    for up in range(1, tiles.OVERZOOM_LEVELS + 1):
+        if z - up < 0:
+            break
+        parent = _serve_tile(provider, z - up, x >> up, y >> up)
+        if parent is None or isinstance(parent, Response):
+            continue
+        image = Image.open(io.BytesIO(parent[0])).convert("RGB")
+        sub = image.width >> up
+        if sub < 1:
+            break
+        mask = (1 << up) - 1
+        qx, qy = (x & mask) * sub, (y & mask) * sub
+        tile = image.crop((qx, qy, qx + sub, qy + sub)).resize(
+            (image.width, image.width), Image.Resampling.LANCZOS
+        )
+        buf = io.BytesIO()
+        tile.save(buf, format="PNG")
+        return Response(
+            content=buf.getvalue(),
+            media_type="image/png",
+            # derived, cheap to rebuild from the cached parent — short-lived
+            headers={"Cache-Control": "private, max-age=3600", "X-Azimut-Overzoom": str(up)},
+        )
+    raise HTTPException(status_code=404, detail="no imagery at this location/zoom")
 
 
 @router.get("/satellite/imagery-date")

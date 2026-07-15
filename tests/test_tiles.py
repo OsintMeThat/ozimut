@@ -180,6 +180,41 @@ def test_all_providers_adds_google_when_keyed(monkeypatch, tmp_path):
     assert google.cacheable is False
     assert google.attribution_burn is True
     assert google.session == "google"
+    assert google.tile_size == 1024  # hi-DPI 4x session (1/16th the billed requests)
+
+
+def test_all_providers_respects_enable_toggles(monkeypatch, tmp_path):
+    monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
+    config.save_settings({
+        **config.DEFAULT_SETTINGS,
+        "api_keys": {"mapbox": "pk.test", "google": "AIza.test"},
+        "providers_enabled": {"mapbox": False},
+    })
+    ids = {p.id for p in tiles.all_providers()}
+    # mapbox switched off (key kept), google untouched by an absent entry
+    assert "mapbox-satellite" not in ids
+    assert "google-satellite" in ids
+
+
+def test_fetch_crop_blocked_at_soft_limit(monkeypatch, tmp_path):
+    provider = _keyed_provider(monkeypatch, tmp_path, "mapbox", "pk.test")
+    config.record_usage("mapbox", int(config.FREE_TIER["mapbox"] * config.BLOCK_SHARE))
+    with pytest.raises(tiles.TileFetchError, match="free tier"):
+        tiles.fetch_crop(48.8584, 2.2945, 15, 512, 512, provider, fetch_tile=_green_tile)
+
+
+def test_fetch_crop_override_lifts_the_block(monkeypatch, tmp_path):
+    provider = _keyed_provider(monkeypatch, tmp_path, "mapbox", "pk.test")
+    config.record_usage("mapbox", config.FREE_TIER["mapbox"])  # 100% used
+    settings = config.load_settings()
+    settings["usage_overrides"] = {"mapbox": True}
+    config.save_settings(settings)
+
+    def fetch(client, url):
+        return Image.new("RGB", (512, 512), (10, 120, 10))
+
+    img, prov = tiles.fetch_crop(48.8584, 2.2945, 15, 512, 512, provider, fetch_tile=fetch)
+    assert prov["tiles_missing"] == 0
 
 
 def test_fetch_crop_rejects_non_capturable_provider():
@@ -240,14 +275,57 @@ def test_fetch_crop_missing_tiles_are_not_billed(monkeypatch, tmp_path):
     calls = {"n": 0}
 
     def fetch(client, url):
+        if "/tiles/512/14/" not in url:
+            return None  # overzoom parents: nothing there either
         calls["n"] += 1
         return None if calls["n"] == 1 else Image.new("RGB", (512, 512), (10, 120, 10))
 
     img, prov = tiles.fetch_crop(48.8584, 2.2945, 15, 900, 900, provider, fetch_tile=fetch)
     assert prov["tiles_missing"] == 1
+    assert prov["tiles_upscaled"] == 0
     # only tiles the provider actually served count toward the meter
     usage = config.load_settings()["usage"]["mapbox"][config.month_key()]
     assert usage == prov["tiles"] - 1
+
+
+def test_fetch_crop_overzoom_fills_gaps_from_parent(monkeypatch, tmp_path):
+    provider = _keyed_provider(monkeypatch, tmp_path, "mapbox", "pk.test")
+    calls = {"n": 0, "parents": []}
+
+    def fetch(client, url):
+        if "/tiles/512/14/" in url:  # the crop's own zoom level
+            calls["n"] += 1
+            return None if calls["n"] == 1 else Image.new("RGB", (512, 512), (10, 120, 10))
+        calls["parents"].append(url)  # one level up: imagery exists
+        return Image.new("RGB", (512, 512), (200, 50, 50))
+
+    img, prov = tiles.fetch_crop(
+        48.8584, 2.2945, 15, 900, 900, provider, marker_style="none", fetch_tile=fetch
+    )
+    # the gap was filled from the parent level, once, and recorded as upscaled
+    assert prov["tiles_missing"] == 0
+    assert prov["tiles_upscaled"] == 1
+    assert len(calls["parents"]) == 1
+    assert "/tiles/512/13/" in calls["parents"][0]
+    # the parent tile the provider served is billed alongside the direct ones
+    usage = config.load_settings()["usage"]["mapbox"][config.month_key()]
+    assert usage == (prov["tiles"] - 1) + 1
+
+
+def test_default_fetch_treats_placeholder_tile_as_missing(monkeypatch):
+    import hashlib
+
+    body = b"esri-not-yet-available"
+    monkeypatch.setattr(
+        tiles, "PLACEHOLDER_TILE_SHA256", frozenset({hashlib.sha256(body).hexdigest()})
+    )
+
+    class FakeClient:
+        def get(self, url):
+            return httpx.Response(200, content=body, request=httpx.Request("GET", url))
+
+    assert tiles._default_fetch(FakeClient(), "http://tiles.example/1/2/3") is None
+    assert tiles.is_placeholder_tile(b"real imagery") is False
 
 
 def test_fetch_crop_unmetered_provider_records_nothing(monkeypatch, tmp_path):
@@ -274,10 +352,13 @@ def test_fetch_crop_google_resolves_session_and_burns_attribution(monkeypatch, t
 
     def fetch(client, url):
         urls.append(url)
-        return _green_tile(client, url)
+        return Image.new("RGB", (1024, 1024), (10, 120, 10))
 
     img, prov = tiles.fetch_crop(48.8584, 2.2945, 15, 512, 512, provider, fetch_tile=fetch)
     assert all("session=tok-live" in u and "key=AIza.test" in u for u in urls)
+    # 1024px hi-DPI tiles: same m/px, requested two zooms lower — 16× fewer requests
+    assert all("/2dtiles/13/" in u for u in urls)
+    assert prov["zoom"] == 15  # provenance keeps the visual zoom
     # dynamic viewport copyright recorded, not just "Google"
     assert prov["attribution"] == "Map data ©2026 Google, Maxar Technologies"
     assert prov["attribution_burned"] is True
@@ -307,7 +388,7 @@ def test_fetch_crop_google_remints_session_on_403(monkeypatch, tmp_path):
                 "expired", request=request, response=httpx.Response(403, request=request)
             )
         assert "session=tok-fresh" in url
-        return _green_tile(client, url)
+        return Image.new("RGB", (1024, 1024), (10, 120, 10))
 
     img, prov = tiles.fetch_crop(48.8584, 2.2945, 15, 512, 512, provider, fetch_tile=fetch)
     assert invalidated == ["AIza.test"]
