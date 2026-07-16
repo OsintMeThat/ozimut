@@ -19,12 +19,20 @@ from __future__ import annotations
 from typing import Any
 
 from ..workspace import Case
+from . import coords as coords_engine
 from . import media as media_engine
 
 
-def coords_label(lat: float, lon: float) -> str:
-    """Default capture title / place label: the point's coordinates."""
-    return f"{lat:.6f}, {lon:.6f}"
+def coords_label(lat: float, lon: float, fmt: str | None = None) -> str:
+    """Default capture title / place label: the point's coordinates, written in
+    the user's coordinate format (Settings → Preferences).
+
+    Only *new* labels are minted here — a title already stored keeps whatever it
+    was named, so switching format never rewrites the case's existing titles.
+    Machine-readable fields (``lat``/``lon``, the ``coords`` attribute) stay in
+    decimal degrees regardless.
+    """
+    return coords_engine.format_coords(lat, lon, fmt)
 
 
 def is_capture(item: dict[str, Any]) -> bool:

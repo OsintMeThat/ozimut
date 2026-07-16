@@ -10,7 +10,7 @@ from pydantic import BaseModel, HttpUrl
 from .. import jobs
 from ..engine import media as media_engine
 from ..workspace import CaseError
-from .cases import get_case
+from .cases import delete_by_path, get_case
 
 router = APIRouter(prefix="/api", tags=["media"])
 
@@ -79,13 +79,15 @@ def job_status(job_id: str) -> dict[str, Any]:
 
 
 @router.delete("/cases/{case_id}/media")
-def delete_media(case_id: str, path: str) -> dict[str, str]:
+def delete_media(case_id: str, path: str) -> dict[str, Any]:
     case = get_case(case_id)
     try:
-        media_engine.delete_media(case, path)
+        result = delete_by_path(case, path)
+        if not result["deleted"]:  # never filed as an entity: drop the files anyway
+            media_engine.delete_media_files(case, path)
     except CaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"status": "deleted"}
+    return result
 
 
 @router.patch("/cases/{case_id}/media")

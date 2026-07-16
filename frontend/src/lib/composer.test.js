@@ -7,6 +7,7 @@ import {
   autoCoords, formatCoords, resolveSourceUrls, autoSource, autoSourceUrls,
   proofCoordsText, proofSource, orderedFeatureColors, legendLines,
   dedupeBySrc, isSatelliteCapture, satPanelInput, mediaPanelInput,
+  SIG_MARGIN, SIG_SCALE, newSignature, signatureBox, signatureOffset,
 } from './composer.js';
 
 // natural is [width, height]; PANEL_H drives the per-row scale.
@@ -675,5 +676,104 @@ describe('isSatelliteCapture — a capture is a media image flagged by its sourc
     ];
     const kept = media.filter((m) => m.kind === 'image' && !isSatelliteCapture(m));
     expect(kept.map((m) => m.path)).toEqual(['media/photo.jpg']);
+  });
+});
+
+describe('coordinate format threading — the reader’s format reaches captions, not provenance', () => {
+  const capture = {
+    path: 'media/sat_1.png',
+    attribution: '© Provider',
+    lat: 48.85, lon: 2.35, zoom: 17,
+    provider_label: 'Esri',
+    fetched_at: '2026-07-14T10:00:00Z',
+    imagery_date: '2024-03-02',
+  };
+
+  it('renders a satellite caption in the chosen format', () => {
+    expect(satPanelInput(capture, 'dms').caption).toBe(
+      'Esri · 48°51\'00.00"N 2°21\'00.00"E · 2024-03-02'
+    );
+    expect(satPanelInput(capture, 'mgrs').caption).toBe('Esri · 31U DQ 52314 10984 · 2024-03-02');
+  });
+
+  it('keeps decimal degrees in the panel meta whatever the caption says', () => {
+    // provenance stays machine-readable: an MGRS caption must not move the
+    // numbers a later reader (or re-export) depends on
+    for (const format of ['dd', 'dms', 'mgrs']) {
+      expect(satPanelInput(capture, format).meta).toMatchObject({ lat: 48.85, lon: 2.35 });
+    }
+  });
+
+  it('defaults to decimal degrees when no format is passed', () => {
+    expect(satPanelInput(capture).caption).toBe('Esri · 48.850000, 2.350000 · 2024-03-02');
+    expect(formatCoords({ lat: 12.3, lon: -4 })).toBe('12.300000, -4.000000');
+  });
+
+  it('formats a proof’s auto coordinates in the chosen format', () => {
+    const panels = [{ meta: { kind: 'satellite', lat: 48.85, lon: 2.35 } }];
+    expect(proofCoordsText({ panels }, 'dms')).toBe('48°51\'00.00"N 2°21\'00.00"E');
+    expect(proofCoordsText({ panels }, 'mgrs')).toBe('31U DQ 52314 10984');
+  });
+
+  it('never reformats a manual override — that text is the analyst’s', () => {
+    const spec = { panels: [{ meta: { kind: 'satellite', lat: 48.85, lon: 2.35 } }], coordsText: 'as given' };
+    expect(proofCoordsText(spec, 'mgrs')).toBe('as given');
+  });
+});
+
+describe('signatureBox — anchoring', () => {
+  const natural = [200, 100]; // 2:1 logo
+  const sig = (extra = {}) => ({ ...newSignature(), ...extra });
+
+  it('sizes the logo as a share of the doc width, keeping its aspect', () => {
+    const box = signatureBox(sig({ scale: 0.1 }), 1000, 800, natural);
+    expect(box.w).toBe(100);
+    expect(box.h).toBe(50); // 2:1 preserved
+  });
+
+  it('hangs off each of the four corners, inset by the margin', () => {
+    const at = (anchor) => signatureBox(sig({ anchor, scale: 0.1 }), 1000, 800, natural);
+    expect(at('tl')).toMatchObject({ x: SIG_MARGIN, y: SIG_MARGIN });
+    expect(at('tr')).toMatchObject({ x: 1000 - SIG_MARGIN - 100, y: SIG_MARGIN });
+    expect(at('bl')).toMatchObject({ x: SIG_MARGIN, y: 800 - SIG_MARGIN - 50 });
+    expect(at('br')).toMatchObject({ x: 1000 - SIG_MARGIN - 100, y: 800 - SIG_MARGIN - 50 });
+  });
+
+  it('applies the drag nudge on top of the anchor', () => {
+    const box = signatureBox(sig({ anchor: 'tl', scale: 0.1, dx: 30, dy: 12 }), 1000, 800, natural);
+    expect(box).toMatchObject({ x: SIG_MARGIN + 30, y: SIG_MARGIN + 12 });
+  });
+
+  it('keeps the same corner as the document grows — the point of anchoring', () => {
+    const small = signatureBox(sig({ anchor: 'br', scale: 0.1 }), 1000, 800, natural);
+    const grown = signatureBox(sig({ anchor: 'br', scale: 0.1 }), 2000, 1600, natural);
+    expect(small.x + small.w).toBe(1000 - SIG_MARGIN);
+    expect(grown.x + grown.w).toBe(2000 - SIG_MARGIN); // still hugging the edge
+  });
+
+  it('clamps a nudge that would push the logo off the export', () => {
+    const box = signatureBox(sig({ anchor: 'tl', scale: 0.1, dx: -500, dy: -500 }), 1000, 800, natural);
+    expect(box).toMatchObject({ x: 0, y: 0 });
+    const far = signatureBox(sig({ anchor: 'tl', scale: 0.1, dx: 5000, dy: 5000 }), 1000, 800, natural);
+    expect(far).toMatchObject({ x: 900, y: 750 }); // flush against the far edge
+  });
+
+  it('defaults to bottom-right at the default scale', () => {
+    const box = signatureBox(newSignature(), 1000, 800, natural);
+    expect(box.w).toBe(1000 * SIG_SCALE);
+    expect(box.x + box.w).toBe(1000 - SIG_MARGIN);
+  });
+});
+
+describe('signatureOffset — a drag round-trips through the anchor', () => {
+  const natural = [200, 100];
+
+  it('returns the dx/dy that reproduces a dropped position', () => {
+    for (const anchor of ['tl', 'tr', 'bl', 'br']) {
+      const sig = { ...newSignature(), anchor, scale: 0.1 };
+      const { dx, dy } = signatureOffset(sig, 1000, 800, natural, 300, 250);
+      const box = signatureBox({ ...sig, dx, dy }, 1000, 800, natural);
+      expect(box).toMatchObject({ x: 300, y: 250 });
+    }
   });
 });

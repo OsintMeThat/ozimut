@@ -12,6 +12,8 @@
  * spec stays valid regardless of layout or zoom (re-editable forever).
  */
 
+import { formatCoords as renderCoords } from './coords.js';
+
 export const PANEL_H = 720;
 export const PAD = 20;
 export const GAP = 16;
@@ -282,11 +284,13 @@ export function autoCoords(panels) {
   return null;
 }
 
-/** Decimal "lat, lon" (6 dp) for a {lat, lon}, or '' when null. */
-export function formatCoords(c) {
-  return c && c.lat != null && c.lon != null
-    ? `${Number(c.lat).toFixed(6)}, ${Number(c.lon).toFixed(6)}`
-    : '';
+/**
+ * A {lat, lon} rendered in the reader's coordinate format, or '' when null.
+ * Defaults to decimal degrees so this stays a pure function — components pass
+ * the user's preference in (state.svelte.js `prefs.coordFormat`).
+ */
+export function formatCoords(c, format = 'dd') {
+  return c && c.lat != null && c.lon != null ? renderCoords(c.lat, c.lon, format) : '';
 }
 
 /**
@@ -333,10 +337,10 @@ export function autoSource(panels) {
 }
 
 /** Effective coordinates text for a proof/spec: manual override else auto. */
-export function proofCoordsText(p) {
+export function proofCoordsText(p, format = 'dd') {
   const manual = p.coordsText?.trim();
   if (manual) return manual;
-  return formatCoords(autoCoords(p.panels ?? []));
+  return formatCoords(autoCoords(p.panels ?? []), format);
 }
 
 /** Effective source line for a proof/spec: manual override else auto. */
@@ -382,6 +386,66 @@ export function docSize(panels, shapes, notes = {}, text = {}, legendOrder = [],
   return { width: contentW, height, legend, cols };
 }
 
+// ---- signature: the analyst's logo, stamped on a proof they choose to sign ---
+
+/** Doc corners the signature can hang off: top/bottom × left/right. */
+export const SIG_ANCHORS = [
+  { id: 'tl', label: 'Top left' },
+  { id: 'tr', label: 'Top right' },
+  { id: 'bl', label: 'Bottom left' },
+  { id: 'br', label: 'Bottom right' },
+];
+
+export const SIG_MARGIN = PAD; // inset from the doc edge at zero offset
+export const SIG_SCALE = 0.12; // default width, as a share of the doc width
+export const SIG_OPACITY = 0.9;
+
+/** A fresh signature record — bottom right, the corner a byline usually takes. */
+export function newSignature() {
+  return { anchor: 'br', dx: 0, dy: 0, scale: SIG_SCALE, opacity: SIG_OPACITY };
+}
+
+/**
+ * Where the signature lands in doc space: {x, y, w, h}.
+ *
+ * Size is a *share of the doc width* (`scale`) rather than fixed pixels, so a
+ * logo keeps its visual weight whether it's stamped on a lone panel or a wide
+ * three-up composite. Position is an `anchor` corner plus a user `dx`/`dy` nudge
+ * — the document grows every time a panel or a font size changes, so a raw x/y
+ * would drift off the image; an anchored offset stays put.
+ *
+ * The result is clamped inside the document: a nudge can't push the logo off
+ * the export, where it would be silently cropped rather than visibly wrong.
+ */
+export function signatureBox(sig, docW, docH, natural) {
+  const [nw, nh] = natural;
+  const w = docW * (sig.scale ?? SIG_SCALE);
+  const h = nw > 0 ? w * (nh / nw) : 0;
+  const right = (sig.anchor ?? 'br').endsWith('r');
+  const bottom = (sig.anchor ?? 'br').startsWith('b');
+  const x = right ? docW - SIG_MARGIN - w : SIG_MARGIN;
+  const y = bottom ? docH - SIG_MARGIN - h : SIG_MARGIN;
+  return {
+    x: clamp(x + (sig.dx ?? 0), 0, Math.max(0, docW - w)),
+    y: clamp(y + (sig.dy ?? 0), 0, Math.max(0, docH - h)),
+    w,
+    h,
+  };
+}
+
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+/**
+ * The `dx`/`dy` that puts the signature's top-left at doc point (x, y) — the
+ * inverse of signatureBox's anchoring, for writing a drag back to the spec.
+ */
+export function signatureOffset(sig, docW, docH, natural, x, y) {
+  const base = signatureBox({ ...sig, dx: 0, dy: 0 }, docW, docH, natural);
+  return { dx: x - base.x, dy: y - base.y };
+}
+
 /** Serializable spec from runtime state (drops live image objects). */
 export function toSpec(proof) {
   return {
@@ -395,6 +459,10 @@ export function toSpec(proof) {
     footerSize: proof.footerSize ?? FOOTER_SIZE,
     footer: proof.footer?.trim() ? proof.footer.trim() : null, // null → default attribution line
     layout: proof.layout ?? 'grid', // 'grid' (rows) | 'free' (per-panel x/y, overlap allowed)
+    // null → unsigned. The logo itself lives in the workspace, never in the
+    // spec: a shared case reads the same, it just renders no signature without
+    // the file (see config.signature_path).
+    signature: proof.signature ? { ...proof.signature } : null,
     notes: { ...(proof.notes ?? {}) },
     legendOrder: [...(proof.legendOrder ?? [])],
     panels: proof.panels.map((p) => ({
@@ -448,8 +516,10 @@ export function offsetShape(shape, d) {
  * NOT when we fetched the tiles) — the date part is simply omitted when the
  * provider doesn't expose it, never substituted with the fetch date.
  */
-export function satPanelInput(s) {
-  const parts = [`${s.provider_label} · ${s.lat.toFixed(6)}, ${s.lon.toFixed(6)}`];
+export function satPanelInput(s, format = 'dd') {
+  // the caption follows the reader's format; the panel meta below keeps the
+  // raw decimal degrees, so provenance stays machine-readable either way
+  const parts = [`${s.provider_label} · ${renderCoords(s.lat, s.lon, format)}`];
   if (s.imagery_date) parts.push(s.imagery_date);
   return {
     src: s.path,

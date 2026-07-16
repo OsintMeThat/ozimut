@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import Konva from 'konva';
   import { api } from '../lib/api.js';
-  import { caseState, uiState, ensureCase, reloadCase, toast } from '../lib/state.svelte.js';
+  import { caseState, uiState, ensureCase, reloadCase, toast, prefs, fmtCoords } from '../lib/state.svelte.js';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
@@ -15,6 +15,7 @@
     autoCoords, formatCoords, autoSource,
     toSpec, newId, loadImage, orderedFeatureColors, notesFromShapes,
     copyShapeSpec, dedupeBySrc, isSatelliteCapture, satPanelInput, mediaPanelInput,
+    SIG_ANCHORS, newSignature, signatureBox, signatureOffset,
   } from '../lib/composer.js';
   import { createHistory } from '../lib/history.js';
 
@@ -40,11 +41,48 @@
     coordsText: '', source: '', // '' → auto-derived from panels; non-empty → manual override
     captionSize: CAPTION_SIZE, legendSize: LEGEND_SIZE, footerSize: FOOTER_SIZE, footer: '',
     layout: 'grid', // 'grid' (rows) | 'free' (drag panels anywhere, overlap allowed)
+    signature: null, // null → unsigned; else { anchor, dx, dy, scale, opacity }
   });
+
+  // The analyst's logo (Settings → Signature): one app-wide PNG, loaded once per
+  // session and shared by every proof. `null` = none saved, which is what keeps
+  // the signature control disabled rather than stamping a broken image.
+  let sigImg = $state(null);
+
+  async function loadSignature() {
+    try {
+      sigImg = await loadImage('/api/settings/signature.png');
+    } catch {
+      sigImg = null; // none saved — the control stays disabled
+    }
+  }
   let advancedOpen = $state(false);
   let collapsed = $state({ panels: false, annotations: false, elements: false });
   let savedName = $state(null);
   let dirty = $state(false);
+
+  // Kept in step with deletes made anywhere else in the app. If the saved proof
+  // this canvas came from is gone, the binding has to go with it — otherwise the
+  // next Save writes a deleted proof back into the case under its old name.
+  // The canvas itself is left alone: the work on screen is still the analyst's.
+  $effect(() => {
+    caseState.rev;
+    const entities = caseState.current?.entities ?? [];
+    if (savedName && !entities.some((e) => e.attrs?.spec === `proofs/${savedName}.json`)) {
+      savedName = null;
+      dirty = true;
+      toast('The saved proof was deleted — saving now files a new one', 'warn');
+    }
+  });
+  // Panels whose media was deleted: the image already drawn stays on the canvas,
+  // but the panel is flagged so a re-save is not silently building on a ghost.
+  const gonePanels = $derived(
+    caseState.current
+      ? proof.panels.filter(
+          (p) => !(caseState.current.entities ?? []).some((e) => e.attrs?.path === p.src)
+        )
+      : []
+  );
   let tool = $state('select');
   let color = $state(ANNO_COLORS[0]);
   let strokeW = $state(4);
@@ -104,6 +142,7 @@
     proof.footerSize = spec.footerSize ?? FOOTER_SIZE;
     proof.footer = spec.footer ?? '';
     proof.layout = spec.layout ?? 'grid';
+    proof.signature = spec.signature ?? null;
     proof.notes = spec.notes ?? {};
     proof.panels = spec.panels.map((p) => ({ ...p, img: imgCache.get(p.src) ?? null }));
     proof.shapes = spec.shapes ?? [];
@@ -146,6 +185,7 @@
   let textEdit = $state(null); // {id, value, left, top, size} — inline text editor
 
   onMount(() => {
+    loadSignature(); // async: the canvas redraws when it lands
     stage = new Konva.Stage({ container: containerEl, width: 100, height: 100 });
     docLayer = new Konva.Layer();
     uiLayer = new Konva.Layer();
@@ -229,10 +269,12 @@
       proof.legendOrder,
       proof.captionSize, proof.legendSize, proof.footerSize, proof.footer,
       proof.layout,
+      proof.signature,
       selectedId,
       selectedPanelId,
       guide,
     ]);
+    sigImg; // the logo lands async — redraw once it does
     if (stage) rebuild();
   });
 
@@ -261,6 +303,7 @@
     proof.footerSize = FOOTER_SIZE;
     proof.footer = '';
     proof.layout = 'grid';
+    proof.signature = null;
     savedName = null;
     selectedId = null;
     selectedPanelId = null;
@@ -292,8 +335,8 @@
     // overlap can never throw the keyed picker's `each_key_duplicate`.
     pickerItems = dedupeBySrc([
       ...sats.map((s) => ({
-        ...satPanelInput(s),
-        label: `${s.lat.toFixed(6)}, ${s.lon.toFixed(6)} · z${s.zoom}`,
+        ...satPanelInput(s, prefs.coordFormat),
+        label: `${fmtCoords(s.lat, s.lon)} · z${s.zoom}`,
         thumb: s.path,
         kind: 'satellite',
       })),
@@ -346,7 +389,7 @@
       if (proof.panels.some((p) => p.src === path)) continue;
       const sat = sats.find((s) => s.path === path);
       if (sat) {
-        await addPanel(satPanelInput(sat));
+        await addPanel(satPanelInput(sat, prefs.coordFormat));
         continue;
       }
       const m = media.find((x) => x.path === path);
@@ -830,6 +873,33 @@
         fontSize: footerSize, fill: TEXT_FAINT,
         fontFamily: 'system-ui, sans-serif', ellipsis: true, wrap: 'none', listening: false,
       }));
+    }
+
+    // signature — last, so the logo sits over everything it overlaps. Drawn into
+    // docLayer (not the UI layer) because it's part of the published image.
+    if (proof.signature && sigImg) {
+      const natural = [sigImg.naturalWidth, sigImg.naturalHeight];
+      const box = signatureBox(proof.signature, width, height, natural);
+      const node = new Konva.Image({
+        image: sigImg, x: box.x, y: box.y, width: box.w, height: box.h,
+        opacity: proof.signature.opacity ?? 1,
+      });
+      // grabbable only with the select tool, and never mid-pan: a drawing tool
+      // must pass through to the panel under the logo. Resolved on pointerdown
+      // like the panels do, so the live tool decides without a rebuild.
+      node.on('pointerdown', () => {
+        node.draggable(tool === 'select' && !spacePan);
+      });
+      // the corner picker gets you there; the drag fine-tunes. Either way the
+      // stored value is an offset from the anchor, so it survives a doc resize
+      node.on('dragend', () => {
+        const { dx, dy } = signatureOffset(
+          proof.signature, width, height, natural, node.x(), node.y(),
+        );
+        proof.signature = { ...proof.signature, dx, dy };
+        dirty = true;
+      });
+      docLayer.add(node);
     }
 
     // selection — keyed on the shape's kind, not the Konva node's class name,
@@ -1483,6 +1553,7 @@
     proof.footerSize = spec.footerSize ?? FOOTER_SIZE;
     proof.footer = spec.footer ?? '';
     proof.layout = spec.layout ?? 'grid';
+    proof.signature = spec.signature ?? null;
     for (const p of spec.panels) {
       try {
         const img = await loadImage(`/files/${caseState.current.id}/${p.src}`);
@@ -1523,7 +1594,9 @@
   // Coordinates + source shown above the panels: a manual override wins, else
   // the value auto-derived from the panels (reactive — deleting the first
   // satellite panel falls back to the next, adding media fills the source).
-  const displayedCoords = $derived(proof.coordsText.trim() || formatCoords(autoCoords(proof.panels)));
+  const displayedCoords = $derived(
+    proof.coordsText.trim() || formatCoords(autoCoords(proof.panels), prefs.coordFormat)
+  );
   const displayedSource = $derived(proof.source.trim() || autoSource(proof.panels));
 </script>
 
@@ -1744,8 +1817,20 @@
           <span><Icon name={collapsed.panels ? 'chevronRight' : 'chevronDown'} size={13} /> Panels <span class="count">{proof.panels.length}</span></span>
         </button>
         {#if !collapsed.panels}
+        {#if gonePanels.length}
+          <!-- A panel's media was deleted from the case. The proof keeps it: the
+               pixels are already composed into the export (ONTOLOGY §3). Only
+               reopening this proof later would come up empty. -->
+          <div class="gone-note">
+            <Icon name="alert" size={12} />
+            <span>
+              {gonePanels.length} panel{gonePanels.length > 1 ? 's' : ''} whose media was deleted.
+              The proof still exports; reopening it later will show them blank.
+            </span>
+          </div>
+        {/if}
         {#each proof.panels as panel, i (panel.id)}
-          <div class="panel-row card" class:selected={selectedPanelId === panel.id}>
+          <div class="panel-row card" class:selected={selectedPanelId === panel.id} class:gone={gonePanels.includes(panel)}>
             <button
               class="panel-thumb"
               title="Select this panel on the canvas"
@@ -1905,10 +1990,10 @@
         {/each}
         {/if}
 
-        <!-- Advanced: text sizes + editable footer (the trickier knobs) -->
+        <!-- Advanced: text sizes, editable footer, signature (the trickier knobs) -->
         <button class="adv-toggle" onclick={() => (advancedOpen = !advancedOpen)} style="margin-top: 14px">
           <Icon name={advancedOpen ? 'chevronDown' : 'chevronRight'} size={13} />
-          Advanced: text &amp; footer
+          Advanced: text, footer &amp; signature
         </button>
         {#if advancedOpen}
           <div class="adv-body">
@@ -1940,6 +2025,59 @@
               oninput={() => (dirty = true)}
             ></textarea>
             <div class="adv-hint">Leave empty to keep the automatic imagery / source attribution.</div>
+
+            <label class="sig-check">
+              <input
+                type="checkbox"
+                disabled={!sigImg}
+                checked={!!proof.signature}
+                onchange={(e) => {
+                  proof.signature = e.currentTarget.checked ? newSignature() : null;
+                  dirty = true;
+                }}
+              />
+              <span>Signature</span>
+            </label>
+            {#if !sigImg}
+              <div class="adv-hint">Add a logo in Settings → Preferences to sign your proofs.</div>
+            {:else if proof.signature}
+              <div class="sig-anchors">
+                {#each SIG_ANCHORS as a (a.id)}
+                  <button
+                    class="sig-anchor"
+                    class:active={proof.signature.anchor === a.id}
+                    title={a.label}
+                    onclick={() => {
+                      // a new corner starts fresh: the old nudge was measured
+                      // from the old corner, so keeping it would fling the logo
+                      proof.signature = { ...proof.signature, anchor: a.id, dx: 0, dy: 0 };
+                      dirty = true;
+                    }}
+                  >{a.label}</button>
+                {/each}
+              </div>
+              <div class="size-row">
+                <span>Size</span>
+                <input class="size-slider" type="range" min="0.04" max="0.4" step="0.01"
+                  value={proof.signature.scale}
+                  oninput={(e) => {
+                    proof.signature = { ...proof.signature, scale: Number(e.currentTarget.value) };
+                    dirty = true;
+                  }} />
+                <span class="size-val">{Math.round(proof.signature.scale * 100)}%</span>
+              </div>
+              <div class="size-row">
+                <span>Opacity</span>
+                <input class="size-slider" type="range" min="0.1" max="1" step="0.05"
+                  value={proof.signature.opacity}
+                  oninput={(e) => {
+                    proof.signature = { ...proof.signature, opacity: Number(e.currentTarget.value) };
+                    dirty = true;
+                  }} />
+                <span class="size-val">{Math.round(proof.signature.opacity * 100)}%</span>
+              </div>
+              <div class="adv-hint">Drag the logo on the canvas to nudge it off the corner.</div>
+            {/if}
           </div>
         {/if}
       </div>
@@ -2199,6 +2337,22 @@
   .meta-reset:hover { color: var(--text-1); background: var(--bg-2); }
   .meta-input { width: 100%; font-size: var(--fs-xs); padding: 5px 8px; }
   .meta-input.warn { border-color: color-mix(in srgb, var(--warn, #e8a33d) 55%, transparent); }
+  .gone-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    margin-bottom: 8px;
+    padding: 7px 9px;
+    border-radius: var(--r-sm);
+    font-size: var(--fs-xs);
+    line-height: 1.4;
+    color: color-mix(in srgb, var(--danger, #e5484d) 80%, var(--text-2));
+    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
+  }
+  .gone-note :global(svg) { flex-shrink: 0; margin-top: 2px; }
+  .panel-row.gone {
+    border-color: color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
+  }
   .panel-row {
     padding: 8px;
     margin-bottom: 8px;
@@ -2273,6 +2427,36 @@
     font-family: inherit;
   }
   .adv-hint { font-size: 11px; color: var(--text-3); margin-top: 5px; }
+  .sig-check {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 12px;
+    font-size: var(--fs-xs);
+    cursor: pointer;
+  }
+  .sig-check input:disabled { cursor: not-allowed; }
+  .sig-check:has(input:disabled) { color: var(--text-3); cursor: not-allowed; }
+  .sig-anchors {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin-top: 7px;
+  }
+  .sig-anchor {
+    padding: 5px 6px;
+    font-size: 11px;
+    color: var(--text-2);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+  }
+  .sig-anchor:hover { color: var(--text-1); }
+  .sig-anchor.active {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
   .cap-input { font-size: var(--fs-xs); padding: 5px 8px; }
   .panel-actions { display: flex; align-items: center; gap: 2px; }
   .panel-scale {

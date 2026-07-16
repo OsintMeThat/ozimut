@@ -21,6 +21,7 @@ from typing import Any, BinaryIO
 from PIL import Image
 
 from ..workspace import Case
+from . import links as link_engine
 
 THUMB_DIR = ".thumbs"
 THUMB_MAX = 512
@@ -111,6 +112,19 @@ def _write_sidecar(media_path: Path, data: dict[str, Any]) -> None:
     )
 
 
+def _source_paths(source: dict[str, Any]) -> list[str]:
+    """The case files a derivative was produced from, as its producer recorded them.
+
+    ``from`` is the single-source op (a frame's video), ``sources`` the
+    multi-source one (a collage's pieces). An import, a download or a satellite
+    capture has neither: its origin is a URL or a provider, which provenance
+    already carries, and there is nothing in the case to point at.
+    """
+    paths = [source["from"]] if source.get("from") else []
+    paths += [p for p in source.get("sources") or [] if p]
+    return paths
+
+
 def _register(
     case: Case,
     media_path: Path,
@@ -140,6 +154,11 @@ def _register(
         existing = case.find_entity(attr="sha256", value=digest)
         if existing:
             media_path.unlink()  # identical bytes already in the case
+            # the bytes were already here, but this derivation is news: the same
+            # frame really can come out of two videos, and the entity keeps both.
+            link_engine.link_all(
+                case, existing["id"], link_engine.DERIVED_FROM, _source_paths(source), by=by
+            )
             return {"duplicate": True, "entity": existing, "item": read_item(case, existing["attrs"]["path"])}
 
     rel_path = f"media/{media_path.name}"
@@ -171,6 +190,11 @@ def _register(
         },
         by=by,
         source=source.get("url"),
+    )
+    # Every media derivative is filed through here, so the derivation chain is
+    # wired once for every tool that produces imagery — present and future.
+    link_engine.link_all(
+        case, entity["id"], link_engine.DERIVED_FROM, _source_paths(source), by=by
     )
     return {"duplicate": False, "entity": entity, "item": {**sidecar, "path": rel_path}}
 
@@ -610,7 +634,12 @@ def update_media(case: Case, rel_path: str, patch: dict[str, Any]) -> dict[str, 
     return {**data, "path": rel_path}
 
 
-def delete_media(case: Case, rel_path: str) -> None:
+def delete_media_files(case: Case, rel_path: str) -> None:
+    """Drop a media's file, sidecar and thumbnail, leaving its entity alone.
+
+    The entity side is the delete chokepoint's business (``api.cases``), which
+    has to tombstone the dependents before anything is removed.
+    """
     media_path = case.resolve_inside(rel_path)
     sidecar = _sidecar_path(media_path)
     data = None
@@ -620,7 +649,3 @@ def delete_media(case: Case, rel_path: str) -> None:
     sidecar.unlink(missing_ok=True)
     if data and data.get("thumbnail"):
         case.resolve_inside(data["thumbnail"]).unlink(missing_ok=True)
-    # remove the matching media entity (matched by case-relative path)
-    entity = case.find_entity(attr="path", value=rel_path)
-    if entity:
-        case.remove_entity(entity["id"])

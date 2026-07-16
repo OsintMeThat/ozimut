@@ -59,18 +59,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
       - name: Build frontend into the package
         working-directory: frontend
         run: npm ci && npm run build
-      - name: Install package + PyInstaller
+      # The wheel only *declares* its dependencies, but the binary *contains*
+      # them — this is the one artifact where the resolver's mood on build day
+      # ships to users. Install from the lock so a tag rebuilds byte-for-byte.
+      - name: Install locked deps + package + PyInstaller
         run: |
-          pip install .
-          pip install pyinstaller
+          uv sync --frozen --no-dev
+          uv pip install . pyinstaller
       - name: Build single-file binary
-        run: pyinstaller packaging/azimut.spec --distpath dist-bin --workpath build-bin
+        run: uv run pyinstaller packaging/azimut.spec --distpath dist-bin --workpath build-bin
       - name: Smoke-test the binary
         shell: bash
         run: |

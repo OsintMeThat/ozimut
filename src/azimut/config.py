@@ -6,6 +6,8 @@ overridable with the ``AZIMUT_HOME`` environment variable):
     ~/Azimut/
     ├── cases/       # named investigations
     ├── scratch/     # one-shot sessions (promotable to cases)
+    ├── runtime/     # newer scrapers fetched at runtime (engine/scrapers.py)
+    ├── signature.png  # optional analyst logo, stamped onto proofs
     └── settings.json
 
 No database server — plain files only (spec §4).
@@ -43,7 +45,25 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "usage_overrides": {},
     "eco_zoom_fallback": True,
     "eco_max_zoom": 15,
+    # Display preferences, app-wide (Settings → Preferences):
+    # - coord_format: how every tool renders a latitude/longitude — "dd"
+    #   (decimal degrees), "dms" (degrees/minutes/seconds), "mgrs" (grid ref).
+    # - units: "metric" (m/km/ha) or "imperial" (ft/mi/acre) for measurements.
+    # Presentation only: artifacts on disk always keep decimal degrees and
+    # metres, so a case reads the same whatever the reader's preference.
+    "coord_format": "dd",
+    "units": "metric",
+    # Where the Satellite tab opens before anything points it somewhere else
+    # (a case artifact, a "go to coords" handoff). {"lat", "lon", "zoom"}.
+    "home_view": {"lat": 48.8584, "lon": 2.2945, "zoom": 16},
+    # The handle a new post draft is addressed to. Empty means no mention.
+    "post_mention": "@GeoConfirmed",
 }
+
+# Accepted values for the display preferences above — mirror of
+# frontend/src/lib/coords.js and frontend/src/lib/measure.js.
+COORD_FORMATS = ("dd", "dms", "mgrs")
+UNIT_SYSTEMS = ("metric", "imperial")
 
 # Documented monthly free allowances per meter, in tile requests (verified
 # 2026-07: Google 2D Map Tiles 100k then $0.60/1k, and ≤15k/day; Mapbox Static
@@ -71,8 +91,35 @@ def scratch_dir() -> Path:
     return workspace_root() / "scratch"
 
 
+def runtime_dir() -> Path:
+    """Where updated scrapers land (engine/scrapers.py).
+
+    In the workspace rather than beside the program because that's the one
+    directory we know is user-writable: the frozen binary can sit in
+    /usr/local/bin or Program Files, and its own contents are read-only.
+    """
+    return workspace_root() / "runtime"
+
+
 def settings_path() -> Path:
     return workspace_root() / "settings.json"
+
+
+def signature_path() -> Path:
+    """The analyst's optional logo, stamped onto proofs they choose to sign.
+
+    App-wide like the API keys, and under the same rule: it lives beside
+    settings.json and is never copied into a case folder or an export bundle.
+    Only the rendered proof PNG ever carries it.
+    """
+    return workspace_root() / "signature.png"
+
+
+# Refuse anything larger as a signature: a logo is a small badge on a composite,
+# and the file is read into memory to be validated and served.
+SIGNATURE_MAX_BYTES = 2 * 1024 * 1024
+# PNG only — the format's alpha channel is what lets a logo sit over imagery.
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def ensure_workspace() -> None:

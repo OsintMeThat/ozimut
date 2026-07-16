@@ -92,6 +92,22 @@ BUILTIN_PROVIDERS: tuple[Provider, ...] = (
         max_zoom=19,
         imagery=False,
     ),
+    # Topographic base map: SRTM contour lines + hillshade, the Garmin-style
+    # look for reading relief. CC-BY-SA, key-less, free for any use provided
+    # the attribution below stays visible — the tile policy's only real limit
+    # is "no mass downloads", which a single-user workbench never approaches.
+    # Stops at z17: deeper zooms come back as a constant "max zoom layer = 17"
+    # placard (its hash is registered below, so a stray request reads as a
+    # coverage gap rather than being stitched into a proof). The live map caps
+    # its zoom here and fetch_crop clamps to it, so neither ever asks.
+    Provider(
+        id="opentopomap",
+        label="OpenTopoMap (topographic · contour lines)",
+        url="https://tile.opentopomap.org/{z}/{x}/{y}.png",
+        attribution="Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)",
+        max_zoom=17,
+        imagery=False,
+    ),
 )
 
 
@@ -214,7 +230,12 @@ class TileFetchError(Exception):
 # content hash turns those into missing tiles, so the overzoom fallback can
 # fill them from the parent level instead of showing the gray placard.
 PLACEHOLDER_TILE_SHA256 = frozenset(
-    {"9eafd300d61393184a4abc1d458564cfd1cd9b6f9c4e9c74687045c0a0e5b858"}  # Esri
+    {
+        "9eafd300d61393184a4abc1d458564cfd1cd9b6f9c4e9c74687045c0a0e5b858",  # Esri
+        # OpenTopoMap's "max zoom layer = 17" placard, served for any z >= 18
+        # (byte-identical everywhere, verified 2026-07)
+        "4b7e1df83d745a752fc357dc6e15f9783838fdbb29ee4189dbcf8ae1fc05874c",
+    }
 )
 # How many parent zoom levels the overzoom fallback may climb. Three levels
 # means an 8× upscale at worst — soft, but it keeps the map usable where a

@@ -3,7 +3,7 @@
 import httpx
 
 from azimut import config
-from azimut.engine import google_tiles
+from azimut.engine import google_tiles, scrapers
 
 
 def test_get_settings_defaults(client):
@@ -334,3 +334,194 @@ def test_put_prefs_eco_max_zoom_clamped(client):
     assert client.get("/api/settings").json()["eco_max_zoom"] == 15
     assert client.put("/api/settings/prefs", json={"eco_max_zoom": 99}).json()["eco_max_zoom"] == 21
     assert client.put("/api/settings/prefs", json={"eco_max_zoom": -3}).json()["eco_max_zoom"] == 1
+
+
+def test_display_prefs_default_and_round_trip(client):
+    body = client.get("/api/settings").json()
+    assert body["coord_format"] == "dd"
+    assert body["units"] == "metric"
+
+    saved = client.put("/api/settings/prefs", json={"coord_format": "mgrs", "units": "imperial"})
+    assert saved.json()["coord_format"] == "mgrs"
+    assert saved.json()["units"] == "imperial"
+    reloaded = client.get("/api/settings").json()
+    assert reloaded["coord_format"] == "mgrs"
+    assert reloaded["units"] == "imperial"
+
+
+def test_display_prefs_reject_unknown_values(client):
+    assert client.put("/api/settings/prefs", json={"coord_format": "utm"}).status_code == 422
+    assert client.put("/api/settings/prefs", json={"units": "furlongs"}).status_code == 422
+    # a rejected value leaves the stored preference alone
+    assert client.get("/api/settings").json()["coord_format"] == "dd"
+
+
+def test_partial_prefs_put_leaves_other_fields_untouched(client):
+    client.put("/api/settings/prefs", json={"coord_format": "dms", "units": "imperial"})
+    saved = client.put("/api/settings/prefs", json={"eco_max_zoom": 12}).json()
+    assert saved["coord_format"] == "dms"  # untouched by an unrelated PUT
+    assert saved["units"] == "imperial"
+
+
+def test_home_view_default_and_round_trip(client):
+    assert client.get("/api/settings").json()["home_view"] == config.DEFAULT_SETTINGS["home_view"]
+
+    view = {"lat": -33.8568, "lon": 151.2153, "zoom": 18}
+    assert client.put("/api/settings/prefs", json={"home_view": view}).json()["home_view"] == view
+    assert client.get("/api/settings").json()["home_view"] == view
+
+
+def test_home_view_rejects_points_off_the_globe(client):
+    bad = [
+        {"lat": 91, "lon": 0, "zoom": 16},
+        {"lat": 0, "lon": -181, "zoom": 16},
+        {"lat": 0, "lon": 0, "zoom": 0},
+        {"lat": 0, "lon": 0, "zoom": 30},
+    ]
+    for view in bad:
+        assert client.put("/api/settings/prefs", json={"home_view": view}).status_code == 422
+    assert client.get("/api/settings").json()["home_view"] == config.DEFAULT_SETTINGS["home_view"]
+
+
+def test_about_facts_are_served(client):
+    body = client.get("/api/settings").json()
+    assert body["version"]
+    assert body["workspace_root"] == str(config.workspace_root())
+
+
+# ---- signature: the analyst's logo, app-wide and never inside a case ---------
+
+# the smallest thing that is genuinely a PNG: the 8-byte magic is what the
+# upload sniffs, so a body starting with it is accepted and nothing else is
+PNG = config.PNG_MAGIC + b"\x00 fake body, never decoded"
+
+
+def test_signature_absent_by_default(client):
+    assert client.get("/api/settings").json()["signature"] is False
+    assert client.get("/api/settings/signature.png").status_code == 404
+
+
+def test_signature_upload_serve_and_delete(client):
+    saved = client.post("/api/settings/signature", files={"file": ("logo.png", PNG, "image/png")})
+    assert saved.status_code == 200
+    assert saved.json() == {"signature": True}
+    assert client.get("/api/settings").json()["signature"] is True
+
+    served = client.get("/api/settings/signature.png")
+    assert served.status_code == 200
+    assert served.content == PNG
+    assert served.headers["content-type"] == "image/png"
+
+    assert client.delete("/api/settings/signature").json() == {"signature": False}
+    assert client.get("/api/settings").json()["signature"] is False
+    assert client.get("/api/settings/signature.png").status_code == 404
+
+
+def test_signature_replace_overwrites_in_place(client):
+    client.post("/api/settings/signature", files={"file": ("a.png", PNG, "image/png")})
+    other = config.PNG_MAGIC + b"\x00 second logo"
+    client.post("/api/settings/signature", files={"file": ("b.png", other, "image/png")})
+    assert client.get("/api/settings/signature.png").content == other
+
+
+def test_signature_delete_is_idempotent(client):
+    assert client.delete("/api/settings/signature").json() == {"signature": False}
+
+
+def test_signature_rejects_non_png(client):
+    # the bytes are what count, not the name or the content-type the browser sent
+    body = client.post("/api/settings/signature", files={"file": ("logo.png", b"GIF89a...", "image/png")})
+    assert body.status_code == 422
+    assert "PNG" in body.json()["detail"]
+    assert client.get("/api/settings").json()["signature"] is False
+
+
+def test_signature_rejects_oversized(client):
+    huge = config.PNG_MAGIC + b"\x00" * config.SIGNATURE_MAX_BYTES
+    body = client.post("/api/settings/signature", files={"file": ("logo.png", huge, "image/png")})
+    assert body.status_code == 413
+    assert client.get("/api/settings").json()["signature"] is False
+
+
+def test_signature_never_lands_in_a_case(client):
+    """It is workspace-level, like the API keys — a case folder never sees it."""
+    client.post("/api/settings/signature", files={"file": ("logo.png", PNG, "image/png")})
+    assert config.signature_path().is_file()
+    assert config.signature_path().parent == config.workspace_root()
+    case_id = client.post("/api/cases", json={"name": "Signed"}).json()["id"]
+    case_dir = config.cases_dir() / case_id
+    assert not list(case_dir.rglob("signature.png"))
+
+
+# ---- scrapers: version reporting and the update button ----------------------
+
+
+def test_get_scrapers_reports_both_offline(client, monkeypatch):
+    """Opening Settings must not reach the network — local-first."""
+
+    def explode(*a, **k):
+        raise AssertionError("GET /settings/scrapers phoned home without check=true")
+
+    monkeypatch.setattr(scrapers.httpx, "get", explode)
+    body = client.get("/api/settings/scrapers").json()["scrapers"]
+    assert {e["dist"] for e in body} == {"yt-dlp", "gallery-dl"}
+    assert all(e["source"] == "bundled" and e["version"] for e in body)
+
+
+def test_get_scrapers_check_reports_what_is_newer(client, monkeypatch):
+    monkeypatch.setattr(scrapers, "latest_version", lambda dist: "9999.1.1")
+    body = client.get("/api/settings/scrapers", params={"check": True}).json()["scrapers"]
+    assert all(e["latest"] == "9999.1.1" and e["outdated"] is True for e in body)
+
+
+def test_check_reports_up_to_date_when_it_matches(client, monkeypatch):
+    current = scrapers.active_version("yt-dlp")[0]
+    monkeypatch.setattr(scrapers, "latest_version", lambda dist: current)
+    entry = next(
+        e
+        for e in client.get("/api/settings/scrapers", params={"check": True}).json()["scrapers"]
+        if e["dist"] == "yt-dlp"
+    )
+    assert entry["outdated"] is False
+
+
+def test_update_unknown_scraper_is_404(client):
+    assert client.post("/api/settings/scrapers/pip/update").status_code == 404
+    assert client.delete("/api/settings/scrapers/pip").status_code == 404
+
+
+def test_update_reports_failure_inline_rather_than_500(client, monkeypatch):
+    """A download that fails is a message in the tab, not a broken app."""
+
+    def offline(*a, **k):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(scrapers.httpx, "get", offline)
+    body = client.post("/api/settings/scrapers/yt-dlp/update").json()
+    assert body["ok"] is False
+    assert "no route to host" in body["detail"]
+
+
+def test_update_then_reset_round_trip(client, monkeypatch):
+    monkeypatch.setattr(
+        scrapers,
+        "update",
+        lambda dist: {
+            "dist": dist,
+            "updated": True,
+            "version": "3.2.1",
+            "previous": "1.0.0",
+            "restart_required": True,
+            "detail": "updated to 3.2.1 — restart Azimut to use it",
+        },
+    )
+    body = client.post("/api/settings/scrapers/yt-dlp/update").json()
+    assert body["ok"] is True and body["restart_required"] is True
+
+    reset = client.delete("/api/settings/scrapers/yt-dlp").json()
+    assert reset["ok"] is True and reset["removed"] is False
+
+
+def test_scrapers_live_in_the_workspace_not_the_install(client):
+    """The runtime dir has to be somewhere writable — the binary's own dir isn't."""
+    assert config.runtime_dir().parent == config.workspace_root()

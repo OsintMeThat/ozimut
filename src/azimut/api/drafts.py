@@ -17,8 +17,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..engine import links as link_engine
 from ..workspace import CaseError
-from .cases import get_case
+from .cases import delete_by_path, get_case
 
 router = APIRouter(prefix="/api", tags=["drafts"])
 
@@ -104,26 +105,37 @@ def save_draft(case_id: str, body: DraftIn) -> dict[str, Any]:
     existing = case.find_entity(attr="draft", value=f"exports/{name}.json")
     if existing:
         case.update_entity(existing["id"], {"label": body.title})
+        entity_id = existing["id"]
     else:
-        case.add_entity(
+        entity_id = case.add_entity(
             "post",
             body.title,
             attrs={"draft": f"exports/{name}.json"},
             by="post-composer",
-        )
+        )["id"]
+
+    # A post is derived from the proof it announces and the media it attaches —
+    # it carries their coordinates and source in its own text, so it outlives
+    # them (ONTOLOGY §3) and only loses its attachment.
+    link_engine.sync(
+        case,
+        entity_id,
+        link_engine.DERIVED_FROM,
+        [body.state.get("proofPng"), body.state.get("mediaPath")],
+        by="post-composer",
+    )
 
     return {"name": name, "draft": f"exports/{name}.json"}
 
 
 @router.delete("/cases/{case_id}/drafts/{name}")
-def delete_draft(case_id: str, name: str) -> dict[str, str]:
+def delete_draft(case_id: str, name: str) -> dict[str, Any]:
     case = get_case(case_id)
     try:
         path = case.resolve_inside(f"exports/{name}.json")
     except CaseError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    path.unlink(missing_ok=True)
-    entity = case.find_entity(attr="draft", value=f"exports/{name}.json")
-    if entity:
-        case.remove_entity(entity["id"])
-    return {"status": "deleted"}
+    result = delete_by_path(case, f"exports/{name}.json")
+    if not result["deleted"]:  # never filed as an entity: drop the file anyway
+        path.unlink(missing_ok=True)
+    return result
