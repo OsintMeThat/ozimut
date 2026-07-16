@@ -16,8 +16,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from ..engine import links as link_engine
 from ..workspace import CaseError
-from .cases import get_case
+from .cases import delete_by_path, get_case
 
 router = APIRouter(prefix="/api", tags=["proofs"])
 
@@ -108,27 +109,38 @@ def save_proof(case_id: str, body: ProofIn) -> dict[str, Any]:
     existing = case.find_entity(attr="spec", value=f"proofs/{name}.json")
     if existing:
         case.update_entity(existing["id"], {"label": body.title})
+        entity_id = existing["id"]
     else:
-        case.add_entity(
+        entity_id = case.add_entity(
             "proof",
             body.title,
             attrs={"spec": f"proofs/{name}.json", **({"path": png_rel} if png_rel else {})},
             by="proof-composer",
-        )
+        )["id"]
+
+    # A proof is derived from the panels it composes: the same click that saves
+    # it files the chain (ONTOLOGY §3). Restated on every save, so a panel
+    # dropped from the proof drops its edge too.
+    link_engine.sync(
+        case,
+        entity_id,
+        link_engine.DERIVED_FROM,
+        [p.get("src") for p in spec.get("panels", []) if p.get("src")],
+        by="proof-composer",
+    )
 
     return {"name": name, "png": png_rel, "spec_path": f"proofs/{name}.json"}
 
 
 @router.delete("/cases/{case_id}/proofs/{name}")
-def delete_proof(case_id: str, name: str) -> dict[str, str]:
+def delete_proof(case_id: str, name: str) -> dict[str, Any]:
     case = get_case(case_id)
     try:
         spec_path = case.resolve_inside(f"proofs/{name}.json")
     except CaseError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    spec_path.unlink(missing_ok=True)
-    spec_path.with_suffix(".png").unlink(missing_ok=True)
-    entity = case.find_entity(attr="spec", value=f"proofs/{name}.json")
-    if entity:
-        case.remove_entity(entity["id"])
-    return {"status": "deleted"}
+    result = delete_by_path(case, f"proofs/{name}.json")
+    if not result["deleted"]:  # never filed as an entity: drop the files anyway
+        spec_path.unlink(missing_ok=True)
+        spec_path.with_suffix(".png").unlink(missing_ok=True)
+    return result

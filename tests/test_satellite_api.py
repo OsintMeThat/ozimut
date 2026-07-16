@@ -1,5 +1,6 @@
 """Satellite capture API: bearing is honored and persisted with provenance."""
 
+import pytest
 from PIL import Image
 
 from azimut.engine import tiles
@@ -337,3 +338,69 @@ def test_edit_title_renames_capture_entity(client, monkeypatch):
     # clearing the title falls back to the coordinates on both sides
     client.patch(f"/api/cases/{cid}/satellite", json={"path": cap["path"], "title": "  "})
     assert _captures(client, cid)[0]["label"] == "48.858400, 2.294500"
+
+
+def test_capture_title_follows_the_coordinate_format(client, monkeypatch):
+    """A default title is minted in the user's format (Settings → Preferences),
+    while the machine-readable fields stay in decimal degrees."""
+    monkeypatch.setattr(tiles, "_default_fetch", _fake_tile)
+    client.put("/api/settings/prefs", json={"coord_format": "mgrs"})
+    cid = client.post("/api/cases", json={"name": "Sat"}).json()["id"]
+
+    result = client.post(
+        f"/api/cases/{cid}/satellite/capture",
+        json={"lat": 48.8583701, "lon": 2.2944813, "zoom": 16, "width": 512, "height": 512},
+    ).json()
+    assert result["title"] == "31U DQ 48250 11951"
+
+    listed = client.get(f"/api/cases/{cid}/satellite").json()[0]
+    assert listed["title"] == "31U DQ 48250 11951"
+    # provenance is never re-expressed: a later reader still gets the numbers
+    assert listed["lat"] == pytest.approx(48.8583701)
+    assert listed["lon"] == pytest.approx(2.2944813)
+    entity = client.get(f"/api/cases/{cid}").json()["entities"][0]
+    assert entity["attrs"]["coords"] == "48.858370, 2.294481"
+
+
+def test_changing_the_format_never_rewrites_existing_titles(client, monkeypatch):
+    """Titles are minted once. Switching format later renames nothing — the
+    case keeps reading the way it was written."""
+    monkeypatch.setattr(tiles, "_default_fetch", _fake_tile)
+    cid = client.post("/api/cases", json={"name": "Sat"}).json()["id"]
+
+    client.post(
+        f"/api/cases/{cid}/satellite/capture",
+        json={"lat": 48.8583701, "lon": 2.2944813, "zoom": 16, "width": 512, "height": 512},
+    )
+    assert client.get(f"/api/cases/{cid}/satellite").json()[0]["title"] == "48.858370, 2.294481"
+
+    client.put("/api/settings/prefs", json={"coord_format": "dms"})
+    # the old capture keeps its decimal title …
+    assert client.get(f"/api/cases/{cid}/satellite").json()[0]["title"] == "48.858370, 2.294481"
+
+    # … while a new one is titled the new way
+    client.post(
+        f"/api/cases/{cid}/satellite/capture",
+        json={"lat": 40.6892, "lon": -74.0445, "zoom": 16, "width": 512, "height": 512},
+    )
+    titles = {c["title"] for c in client.get(f"/api/cases/{cid}/satellite").json()}
+    assert titles == {"48.858370, 2.294481", "40°41'21.12\"N 74°02'40.20\"W"}
+
+
+def test_place_label_follows_the_coordinate_format(client):
+    client.put("/api/settings/prefs", json={"coord_format": "dms"})
+    cid = client.post("/api/cases", json={"name": "Sat"}).json()["id"]
+
+    place = client.post(
+        f"/api/cases/{cid}/satellite/place",
+        json={"lat": 48.8583701, "lon": 2.2944813, "zoom": 16},
+    ).json()
+    assert place["label"] == "48°51'30.13\"N 2°17'40.13\"E"
+    assert place["attrs"]["coords"] == "48.858370, 2.294481"  # attrs stay decimal
+
+    # an explicit title always wins over the derived one
+    titled = client.post(
+        f"/api/cases/{cid}/satellite/place",
+        json={"lat": 48.8583701, "lon": 2.2944813, "zoom": 16, "title": "Rooftop"},
+    ).json()
+    assert titled["label"] == "Rooftop"

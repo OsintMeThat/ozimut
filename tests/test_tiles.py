@@ -150,6 +150,44 @@ def test_fetch_crop_tile_cap():
         raise AssertionError("expected TileFetchError for oversized crop")
 
 
+def test_opentopomap_is_a_keyless_builtin(monkeypatch, tmp_path):
+    monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
+    otm = next(p for p in tiles.all_providers() if p.id == "opentopomap")
+    assert otm.needs_key is False  # core features never require a key
+    assert otm.meter is None  # free: no billing counter to keep
+    # CC-BY-SA makes the attribution a condition of the licence, not a courtesy
+    assert "OpenTopoMap" in otm.attribution and "CC-BY-SA" in otm.attribution
+    assert "OpenStreetMap" in otm.attribution and "SRTM" in otm.attribution
+    # a topographic base map, not imagery: the labels overlay would double its labels
+    assert otm.imagery is False
+    # the server itself answers deeper zooms with a "max zoom layer = 17" placard
+    assert otm.max_zoom == 17
+    # no {s}: the capture path formats only x/y/z and would raise on a subdomain
+    assert "{s}" not in otm.url
+
+
+def test_fetch_crop_never_requests_past_opentopomap_max_zoom(monkeypatch, tmp_path):
+    """A capture must never ask OpenTopoMap for z >= 18.
+
+    Deeper zooms come back as a constant "max zoom layer = 17" placard, so
+    stitching one would put that placard into a proof. fetch_crop clamps to the
+    provider max instead — and records the honest zoom in provenance.
+    """
+    monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
+    otm = next(p for p in tiles.all_providers() if p.id == "opentopomap")
+    seen: list[int] = []
+
+    def fake_fetch(client, url):
+        seen.append(int(url.split("/")[-3]))
+        return Image.new("RGB", (256, 256), (200, 180, 140))
+
+    _, prov = tiles.fetch_crop(45.92, 6.87, 19, 512, 512, otm, fetch_tile=fake_fetch)
+    assert seen and max(seen) == 17
+    assert prov["zoom"] == 17
+    # m/px must describe the zoom actually captured, not the one asked for
+    assert prov["meters_per_pixel"] == round(tiles.meters_per_pixel(45.92, 17), 3)
+
+
 def test_all_providers_omits_keyed_providers_without_keys(monkeypatch, tmp_path):
     monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
     ids = {p.id for p in tiles.all_providers()}

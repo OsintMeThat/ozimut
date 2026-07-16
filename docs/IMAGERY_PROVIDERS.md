@@ -1,7 +1,7 @@
 # Keyed imagery providers — Mapbox & Google
 
 > Azimut ships two optional user-keyed basemaps alongside the key-less defaults
-> (Esri, OSM). The rules below are why their code looks the way it does — they come
+> (Esri, OSM, OpenTopoMap). The rules below are why their code looks the way it does — they come
 > from Google's and Mapbox's terms, not from taste. Read alongside SPEC.md §6
 > "v1 notes → Tile providers" (legal-only policy).
 >
@@ -15,7 +15,7 @@
 | Rule | Why |
 |------|-----|
 | Keys are **user-supplied**, stored **locally**, **never** bundled into a shared case/zip. | Principle 7; keys are the user's own billing identity. |
-| Core features never require a key. Key-less providers (Esri, OSM) stay the default. | Principle 7. |
+| Core features never require a key. Key-less providers (Esri, OSM, OpenTopoMap) stay the default. | Principle 7. |
 | **Never** ship/suggest/document unofficial endpoints (`mt1.google.com`, `khms*`, …). Only official APIs. | Legal-only policy. |
 | **Google tiles must NOT be cached to disk.** | Google's Map Tiles API forbids pre-fetch/store/cache/offline use of tiles ([policies](https://developers.google.com/maps/documentation/tile/policies)). |
 | A Google **capture** is allowed only as a **flattened, attributed screenshot** (single PNG, attribution burned in) — never a store of raw tiles. | Google Geo Guidelines permit screenshots in reports/periodicals ≤5,000 copies **with attribution**; the anti-cache clause forbids tile hoarding. Two different acts. |
@@ -27,12 +27,22 @@
 |----------|:-----------:|------------|:------------:|:-----------------------------:|--------------------|
 | Esri World Imagery | no | — | yes | yes | static string |
 | OpenStreetMap | no | — | yes | yes | static string |
+| OpenTopoMap | no | — | yes | yes | static string (CC-BY-SA² ) |
 | **Mapbox Satellite** | yes | access token in URL | yes | yes¹ | `© Mapbox © OpenStreetMap` (+ Maxar) |
 | **Google Satellite** | yes | **session token** | yes (flattened+attributed only) | **NO** | dynamic copyright from viewport endpoint |
 
 ¹ Display + static-image capture with attribution is permitted; plan-level
 caching/redistribution limits vary, so the cache stays modest (30-day TTL) and
 attribution always on.
+
+² Free for any use, commercial included, *provided* the attribution line stays
+visible — CC-BY-SA makes it a licence condition, not a courtesy. The tile
+policy's only real limit is "no mass downloads", which a single-user workbench
+never approaches. Topographic, so `imagery=false` (the labels overlay would
+double its own labels). Its tile server stops at **z17** and answers deeper
+zooms with a constant "max zoom layer = 17" placard — registered in
+`PLACEHOLDER_TILE_SHA256`, and the live map caps its zoom at the provider max
+so it is never requested. Verified 2026-07.
 
 ## Google is not a static `{key}` URL
 

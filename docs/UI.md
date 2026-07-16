@@ -42,6 +42,8 @@ Rules:
 
 Four sections; tools list (and delete) their own saved artifacts via their
 Open lists / shelves — the sidebar never duplicates a by-tool listing.
+Its left edge is a drag handle (240–640 px, capped at half the window;
+double-click resets, width persists).
 
 - **Case Notes** — `notes.md`.
 - **Suggestions** — tool-suggested entities; confirm or dismiss (only shown

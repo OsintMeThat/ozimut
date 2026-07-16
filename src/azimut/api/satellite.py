@@ -21,7 +21,7 @@ from ..engine import (
     tiles,
 )
 from ..workspace import CaseError
-from .cases import get_case
+from .cases import delete_by_path, get_case
 
 router = APIRouter(prefix="/api", tags=["satellite"])
 
@@ -270,7 +270,8 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
 
     # the recorded point is the marker (== center unless it was moved off-center)
     marker_lat, marker_lon = provenance["lat"], provenance["lon"]
-    label = satellite_engine.coords_label(marker_lat, marker_lon)
+    label = satellite_engine.coords_label(marker_lat, marker_lon)  # user's format
+    coords_dd = satellite_engine.coords_label(marker_lat, marker_lon, "dd")
     plus_code = geo.plus_code(marker_lat, marker_lon)
     provenance["plus_code"] = plus_code
     provenance["dms"] = geo.to_dms(marker_lat, marker_lon)
@@ -293,7 +294,7 @@ def capture(case_id: str, body: CaptureIn) -> dict[str, Any]:
         by="satellite",
         entity_type="capture",
         extra_attrs={
-            "coords": label, "lat": marker_lat, "lon": marker_lon,
+            "coords": coords_dd, "lat": marker_lat, "lon": marker_lon,
             "plus_code": plus_code, "zoom": provenance["zoom"], "bearing": body.bearing,
         },
         title=label,
@@ -308,9 +309,9 @@ def save_place(case_id: str, body: PlaceIn) -> dict[str, Any]:
     """Save just a point (the pin, or the crop center) as a navigable ``place`` —
     no image. Clicking it in the sidebar flies the map back to it."""
     case = get_case(case_id)
-    coords = satellite_engine.coords_label(body.lat, body.lon)
-    label = (body.title or "").strip() or coords
-    attrs = {"coords": coords, "lat": body.lat, "lon": body.lon,
+    label = (body.title or "").strip() or satellite_engine.coords_label(body.lat, body.lon)
+    attrs = {"coords": satellite_engine.coords_label(body.lat, body.lon, "dd"),
+             "lat": body.lat, "lon": body.lon,
              "plus_code": geo.plus_code(body.lat, body.lon),
              "zoom": body.zoom, "bearing": body.bearing}
     if body.notes and body.notes.strip():
@@ -324,14 +325,17 @@ def list_captures(case_id: str) -> list[dict[str, Any]]:
 
 
 @router.delete("/cases/{case_id}/satellite")
-def delete_capture(case_id: str, path: str) -> dict[str, str]:
-    # a capture is a media item: this drops the file + thumbnail + sidecar + entity
+def delete_capture(case_id: str, path: str) -> dict[str, Any]:
+    # a capture is a media item: the chokepoint drops the file + thumbnail +
+    # sidecar + entity, and honours whatever derives from or depends on it.
     case = get_case(case_id)
     try:
-        media_engine.delete_media(case, path)
+        result = delete_by_path(case, path)
+        if not result["deleted"]:  # never filed as an entity: drop the files anyway
+            media_engine.delete_media_files(case, path)
     except CaseError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"status": "deleted"}
+    return result
 
 
 @router.patch("/cases/{case_id}/satellite")

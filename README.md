@@ -19,7 +19,7 @@ workbench: fix a direction, fix a location.*
 | Tool | What it does |
 |------|--------------|
 | **Media Library** | Import local files or download by URL (X, Telegram, TikTok, YouTube, Instagram… via yt-dlp, with a gallery-dl fallback for image-only posts) → clean local file + metadata + SHA-256. Multi-photo posts open a picker. |
-| **Inspect** | Scratch workspace over any photo/video: frame adjustments, editable crop, sharpest-frame capture, hand-made collage with per-piece warp/scale/rotate — nothing enters the case until you save. |
+| **Inspect** | Scratch workspace over any photo/video: frame adjustments, editable crop, sharpest-frame capture, hand-made collage with per-piece warp/scale/rotate, and **auto-stitch** to solve a panorama's layout for you (then hand-tune it) — nothing enters the case until you save. |
 | **Satellite** | Coordinates or place name → imagery crop, with select-area capture, map rotation, measurement tools, and reference-image overlays. Esri/OSM by default; add your own Mapbox/Google key for more basemaps (stored locally, never shared). |
 | **Proof Composer** | Compose panels in a grid or free layout, annotate with colored shapes and text (same color = same feature), reorderable legend → export `proof.png` + a re-editable spec. |
 | **Post Composer** | Turn a proof into a publishable thread: coordinates in all formats, plus code, attribution, character count, RTL-safe text. Copy-paste ready — Azimut never posts for you. |
@@ -73,9 +73,34 @@ bundled into the Python wheel via hatchling `artifacts`. So `npm run build`
 
 ```bash
 cd frontend && npm run build && cd ..   # refresh the bundled UI
+uv sync --frozen                         # the exact deps CI tested
 python -m build                          # wheel + sdist (UI included)
-pyinstaller packaging/azimut.spec        # optional: standalone binary
+uv run pyinstaller packaging/azimut.spec # optional: standalone binary
 ```
+
+### Dependencies
+
+`pyproject.toml` declares **ranges** (that's the contract for `pip install
+azimut` users); `uv.lock` pins the **exact** set, and is what CI and the release
+builds install. The wheel only declares its dependencies, but the binary
+*contains* them — so building it outside the lock ships whatever the resolver
+happened to pick that day.
+
+```bash
+uv lock --check                  # CI does this: is the lock in sync with pyproject?
+uv lock --upgrade                # refresh everything, then run the suite
+uv lock --upgrade-package yt-dlp # refresh one
+```
+
+Raising an upper bound is a deliberate act: bump it in `pyproject.toml`, run
+`uv lock`, and make sure the suite passes before it lands. The weekly
+"latest deps" CI job re-resolves past the lock, so upstream breakage shows up
+as a red run of ours rather than a broken install for someone else.
+
+**yt-dlp and gallery-dl are deliberately unbounded** — they track sites that
+change, so an old version is a broken version. They're also updatable from
+inside the app (Settings → About → Downloaders), which is what keeps a
+months-old binary working.
 
 Releases are automated: push a semver tag and GitHub Actions
 ([`.github/workflows/release.yml`](.github/workflows/release.yml)) builds the

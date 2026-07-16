@@ -1,6 +1,6 @@
 <script>
   import { api } from '../lib/api.js';
-  import { caseState, uiState, toast, reloadCase } from '../lib/state.svelte.js';
+  import { caseState, uiState, toast, reloadCase, prefs } from '../lib/state.svelte.js';
   import { proofCoordsText, proofSource } from '../lib/composer.js';
   import { bidiSafe } from '../lib/bidi.js';
   import Icon from '../components/Icon.svelte';
@@ -15,7 +15,7 @@
   let place = $state('');
   let placeLoading = $state(false);
   let description = $state('');
-  let mention = $state('@GeoConfirmed');
+  let mention = $state(prefs.postMention);
   let source = $state('');
   let proofPng = $state(null);
   let proofVer = $state(0); // cache-buster: bumped whenever proofPng is (re)assigned
@@ -34,6 +34,23 @@
 
   // Draft persistence
   let draftName = $state(null); // slug of the saved draft (null until first save)
+
+  // Kept in step with deletes made anywhere else in the app: a draft deleted
+  // from the sidebar must not be resurrected by the next Save under its old
+  // name. The thread on screen stays — a post outlives its proof (ONTOLOGY §3),
+  // it only loses the attachment.
+  $effect(() => {
+    caseState.rev;
+    const entities = caseState.current?.entities ?? [];
+    if (draftName && !entities.some((e) => e.attrs?.draft === `exports/${draftName}.json`)) {
+      draftName = null;
+      toast('The saved draft was deleted — saving now files a new one', 'warn');
+    }
+    if (proofPng && !entities.some((e) => e.attrs?.path === proofPng)) {
+      setProof(null);
+      toast('The attached proof was deleted — the thread text is untouched', 'warn');
+    }
+  });
   let saving = $state(false);
   let discardConfirm = $state(false);
   let openList = $state(null); // list of saved drafts, null = closed
@@ -403,7 +420,7 @@
       description = s.description ?? '';
       coordsText = s.coordsText ?? '';
       place = s.place ?? '';
-      mention = s.mention ?? '@GeoConfirmed';
+      mention = s.mention ?? prefs.postMention;
       source = s.source ?? '';
       setProof(s.proofPng ?? null);
       mediaEnabled = s.mediaEnabled ?? true;
@@ -436,7 +453,7 @@
     coordsText = '';
     geo = null;
     place = '';
-    mention = '@GeoConfirmed';
+    mention = prefs.postMention;
     source = '';
     setProof(null);
     tweet1 = '';

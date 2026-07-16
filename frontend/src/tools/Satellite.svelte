@@ -3,7 +3,9 @@
   import L from 'leaflet';
   import 'leaflet/dist/leaflet.css';
   import { api } from '../lib/api.js';
-  import { caseState, uiState, ensureCase, reloadCase, toast } from '../lib/state.svelte.js';
+  import {
+    caseState, uiState, ensureCase, reloadCase, toast, prefs, fmtCoords, prefsReady,
+  } from '../lib/state.svelte.js';
   import { mapLinks } from '../lib/maplinks.js';
   import * as measure from '../lib/measure.js';
   import { dragBearing, pivotPanOffset } from '../lib/satRotate.js';
@@ -28,7 +30,11 @@
   let providers = $state([]);
   let providerId = $state('esri-world-imagery');
   let coordsText = $state('');
-  let center = $state({ lat: 48.8584, lon: 2.2945, zoom: 16 });
+  // opens on the user's home view (Settings → Preferences) until a case
+  // artifact or a "go to coords" handoff points the map somewhere else.
+  // Seeded from the defaults, then re-read under `prefsReady` in onMount —
+  // a deep link to #satellite mounts this before the settings fetch lands.
+  let center = $state({ ...prefs.homeView });
   let markerStyle = $state('none'); // 'crosshair' | 'pin' | 'none' — clean view by default (item 4)
   let moveMode = $state(false); // pin decoupled from center, draggable
   let marker = null; // Leaflet marker instance while in move mode
@@ -185,6 +191,8 @@
   onMount(async () => {
     refreshUsage(); // prefs drive the eco/soft-block fallbacks from the start
     providers = await api.get('/api/satellite/providers');
+    await prefsReady; // the home view has to land before the map is built
+    center = { ...prefs.homeView };
     // leaflet-rotate patches the global L, so expose it before importing.
     window.L = L;
     await import('leaflet-rotate');
@@ -204,7 +212,11 @@
     // CSS offset below, instead of Leaflet's default corner margin
     L.control.zoom({ position: 'topleft' }).addTo(map);
     // judging feature sizes (buildings, roads) needs a scale reference
-    L.control.scale({ imperial: false, position: 'bottomright' }).addTo(map);
+    L.control.scale({
+      metric: prefs.units !== 'imperial',
+      imperial: prefs.units === 'imperial',
+      position: 'bottomright',
+    }).addTo(map);
     map.on('moveend zoomend', () => {
       const c = map.getCenter();
       center = { lat: c.lat, lon: c.lng, zoom: map.getZoom() };
@@ -441,10 +453,10 @@
   const measureReadout = $derived.by(() => {
     if (!measureMode || measurePoints.length < 2) return null;
     if (measureMode === 'distance')
-      return measure.formatDistance(measure.pathLength(measurePoints));
+      return measure.formatDistance(measure.pathLength(measurePoints), prefs.units);
     if (measureMode === 'area')
       return measurePoints.length >= 3
-        ? measure.formatArea(measure.polygonArea(measurePoints))
+        ? measure.formatArea(measure.polygonArea(measurePoints), prefs.units)
         : '…';
     // angle needs a middle vertex
     return measurePoints.length >= 3
@@ -517,6 +529,10 @@
     // as "not yet available" placards. Only {s} subdomain templates (custom
     // providers) stay direct — the proxy can't expand those.
     const url = p.url.includes('{s}') ? p.url : `/api/tiles/${p.id}/{z}/{x}/{y}`;
+    // maxZoom caps the map itself (no map-level maxZoom is set), which is what
+    // keeps a shallower provider (OpenTopoMap, z17) from ever being asked for
+    // tiles it would answer with a "max zoom layer" placard — and keeps the
+    // view zoom at or under the provider max, which capture sizing relies on.
     const opts = { attribution: p.attribution, maxZoom: p.max_zoom };
     // grid cell in CSS px (lib/usage.js layerCell): bigger tiles offset the
     // URL z down (512 → -1, 1024 → -2); an oversample halves the cell so each
@@ -538,6 +554,10 @@
       opts.keepBuffer = 4;
     }
     if (tileLayer) tileLayer.remove();
+    // Past its maxZoom Leaflet drops a grid layer entirely rather than upscale
+    // it, so switching to a shallower provider (OpenTopoMap, z17) while zoomed
+    // deeper would leave a blank map. Pull the view back to what it can serve.
+    if (map.getZoom() > p.max_zoom) map.setZoom(p.max_zoom);
     tileLayer = L.tileLayer(url, opts).addTo(map);
     tileLayer.on('load tileload', scheduleDeSeam);
     if (p.meter) {
@@ -579,11 +599,12 @@
     api.get(`/api/cases/${id}/satellite`).then((r) => (captures = r));
   });
 
-  // the map container resizes when the sidebar toggles, and reappears from
-  // display:none when the tool tab is re-selected (tools stay mounted) — both
-  // need Leaflet to re-measure and redraw tiles for the exposed area
+  // the map container resizes when the sidebar toggles or is dragged wider, and
+  // reappears from display:none when the tool tab is re-selected (tools stay
+  // mounted) — all need Leaflet to re-measure and redraw tiles for the exposed area
   $effect(() => {
     uiState.sidebarOpen; // track the global sidebar toggle
+    uiState.sidebarW; // …and its width, live through a resize drag
     if (!mapReady || uiState.tool !== 'satellite') return;
     tick().then(() => map?.invalidateSize());
   });
@@ -976,7 +997,7 @@
   }
 
   function coordsLabel(item) {
-    return `${item.lat.toFixed(6)}, ${item.lon.toFixed(6)}`;
+    return fmtCoords(item.lat, item.lon);
   }
 
   function sendToComposer(item) {
@@ -984,12 +1005,12 @@
     uiState.tool = 'proof';
   }
 
-  function fmt(value) {
-    return value.toFixed(6);
-  }
+  // the HUD readout and everything copied out of it follow the user's
+  // coordinate format (Settings → Preferences); captures keep decimal degrees
+  const readout = $derived(fmtCoords(displayCoords.lat, displayCoords.lon));
 
   async function copyCoords() {
-    await navigator.clipboard.writeText(`${fmt(displayCoords.lat)}, ${fmt(displayCoords.lon)}`);
+    await navigator.clipboard.writeText(readout);
     toast('Coordinates copied', 'ok', 1600);
   }
 
@@ -1052,7 +1073,7 @@
   }
 
   function placeCoordsLabel(m) {
-    return `${m.lat.toFixed(6)}, ${m.lon.toFixed(6)}`;
+    return fmtCoords(m.lat, m.lon);
   }
 
   async function savePlaceModal() {
@@ -1266,7 +1287,7 @@
       <div class="hud card">
         <button class="hud-coords mono" onclick={copyCoords} title="Copy coordinates">
           <Icon name="crosshair" size={13} />
-          {fmt(displayCoords.lat)}, {fmt(displayCoords.lon)}
+          {readout}
           <span class="z">z{center.zoom}</span>
           {#if moveMode && markerLatLng}<span class="pin-tag">pin</span>{/if}
           <Icon name="copy" size={12} />
@@ -1558,7 +1579,7 @@
                 </a>
               {/each}
             </div>
-            <div class="links-note mono">{fmt(displayCoords.lat)}, {fmt(displayCoords.lon)}</div>
+            <div class="links-note mono">{readout}</div>
           {/if}
 
           <!-- Places: navigable points (no image) -->
@@ -1750,7 +1771,7 @@
     <div class="sat-info-rows">
       <div class="sat-info-row">
         <span class="sat-info-label">Coordinates</span>
-        <span class="mono">{notesItem.lat?.toFixed(6)}, {notesItem.lon?.toFixed(6)}</span>
+        <span class="mono">{coordsLabel(notesItem)}</span>
       </div>
       <div class="sat-info-row">
         <span class="sat-info-label">Provider</span>
