@@ -15,6 +15,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 def create_app() -> FastAPI:
     config.ensure_workspace()
+    # Before any router can import a scraper: point yt-dlp/gallery-dl at the
+    # newer copies in the workspace, if the user has fetched any. No network.
+    from .engine import scrapers
+
+    scrapers.activate()
 
     app = FastAPI(title="Azimut", version=__version__, docs_url="/api/docs")
 

@@ -274,13 +274,25 @@ class Case:
         *,
         by: str,
         status: EntityStatus = "confirmed",
+        unique: bool = False,
     ) -> dict[str, Any]:
+        """Add a typed edge. ``unique`` returns the existing identical edge
+        instead of stacking a duplicate — what a producer wants when its output
+        can dedupe onto an entity that is already in the case."""
         with self._lock:
             data = self.read()
             ids = {e["id"] for e in data["entities"]}
             for eid in (from_id, to_id):
                 if eid not in ids:
                     raise CaseError(f"entity '{eid}' not found")
+            if unique:
+                for existing in data["links"]:
+                    if (existing["from"], existing["to"], existing["type"]) == (
+                        from_id,
+                        to_id,
+                        type_,
+                    ):
+                        return existing
             link = {
                 "id": _new_id("l"),
                 "from": from_id,
@@ -291,6 +303,55 @@ class Case:
             data["links"].append(link)
             self._write_json(data)
             return link
+
+    def sync_links(
+        self,
+        from_id: str,
+        type_: str,
+        to_ids: list[str],
+        *,
+        by: str,
+        status: EntityStatus = "confirmed",
+    ) -> list[dict[str, Any]]:
+        """Make ``from_id``'s outgoing links of ``type_`` exactly ``to_ids``.
+
+        Re-saving an artifact restates its sources rather than piling onto them:
+        edges that are still true are left untouched (same id, same timestamp),
+        edges that are no longer true are dropped, new ones are appended. Unknown
+        targets and a self-reference are ignored.
+        """
+        with self._lock:
+            data = self.read()
+            ids = {e["id"] for e in data["entities"]}
+            if from_id not in ids:
+                raise CaseError(f"entity '{from_id}' not found")
+            wanted = [
+                i for i in dict.fromkeys(to_ids) if i in ids and i != from_id
+            ]
+            mine = {
+                l["to"]: l
+                for l in data["links"]
+                if l["from"] == from_id and l["type"] == type_
+            }
+            keep = {mine[to_id]["id"] for to_id in wanted if to_id in mine}
+            data["links"] = [
+                l
+                for l in data["links"]
+                if l["from"] != from_id or l["type"] != type_ or l["id"] in keep
+            ]
+            for to_id in wanted:
+                if to_id not in mine:
+                    data["links"].append(
+                        {
+                            "id": _new_id("l"),
+                            "from": from_id,
+                            "to": to_id,
+                            "type": type_,
+                            "provenance": {"by": by, "at": _now(), "status": status},
+                        }
+                    )
+            self._write_json(data)
+            return [l for l in data["links"] if l["from"] == from_id and l["type"] == type_]
 
     def remove_link(self, link_id: str) -> None:
         with self._lock:
