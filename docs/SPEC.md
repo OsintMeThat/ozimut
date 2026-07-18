@@ -135,9 +135,22 @@ never as new rail entries. Releases ship as GitHub `v0.x` tags.
 | **OCR** | Read signs/plates (tesseract), detect script/language. |
 | **Ground Imagery** | Ground-level photos: Panoramax/Mapillary/KartaView key-less first; Street View easy link, optional keyed in-app view. |
 | **Panorama** | Stitch a video window / frame set. Auto-stitch already in Inspect; still to do: sample a video window directly, seam blending. |
+| **Proof annotation** | Grow the Proof Composer toolbox: shape fill + dashed strokes, freehand, numbered markers, a redaction/blur box; a document-level free layer so shapes cross panels and reach the margins; callout / zoom insets. |
+| **Case Notebook** | A full notes page, not just raw `notes.md`: write, paste screenshots and images, embed links to places/entities; a writer pane + a reader pane. |
+| **Proof Templates** | Save a proof's house style (layout, colors, legend, signature) as a reusable template/preset; new proofs start from one. |
 
 Also toward v2: GIF maker, curated tools-links page, command palette (Ctrl+K),
-full-text case search, timezone + local-time readout at coords.
+full-text case search, timezone + local-time readout at coords, clipboard
+capture (paste an image or a URL anywhere → filed as media with provenance),
+scale bar + north arrow + optional graticule burned into captures
+(preference-toggled auto-inclusion, extension/widget capture path included),
+read EXIF/GPS at media import → suggest place/time, Post Composer targets beyond
+X (Mastodon, Bluesky, generic report).
+
+Engineering (toward v2): split the monolith tool components (Satellite,
+ProofComposer) by extracting their logic into `lib/` modules like the other
+tools; add component/interaction tests (Playwright) for the canvas gestures the
+`lib` unit tests can't reach.
 
 ### v3 — investigation layer
 
@@ -152,13 +165,15 @@ full-text case search, timezone + local-time readout at coords.
 Also toward v3: dependency-aware delete (partly done), downloader cookies,
 archive-on-download + archive time machine (Wayback CDX snapshot timeline +
 diff), web-page save extension, case bundle export/import, an editable/filterable
-places table (CSV/GeoJSON export), a Proof Composer free image-overlay layer,
-callout/detail insets, audio analyzer (Whisper) + acoustic context hints
-(bells/adhan/aircraft/language), auto-translation → English (offline), temporal
-change detection over imagery dates, a pattern-of-life map (a source's
+places table (CSV/GeoJSON export), audio analyzer (Whisper) + acoustic context
+hints (bells/adhan/aircraft/language), auto-translation → English (offline),
+temporal change detection over imagery dates, a pattern-of-life map (a source's
 extractable locations on map + timeline), a full chronolocation solver
-(shadow + sun + weather → dated window), optional X/Twitter API key in Settings
-(with quota) to auto-publish Post Composer threads when enabled.
+(shadow + sun + weather → dated window), auto-hash + timestamp on every export
+(proof.png etc.) recorded in the evidence journal, cross-case global search (a
+handle/coordinate/face across all cases, distinct from the in-case full-text
+search), optional X/Twitter API key in Settings (with quota) to auto-publish
+Post Composer threads when enabled.
 
 ### v4 — orchestration & advanced
 

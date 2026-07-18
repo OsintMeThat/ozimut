@@ -195,7 +195,7 @@ def apply_ops(image: Image.Image, ops: list[dict[str, Any]]) -> Image.Image:
     """Run an ordered list of ``{"op": id, "params": {...}}`` through the pipeline."""
     out = image if image.mode == "RGBA" else image.convert("RGB")
     for op in ops:
-        flt = FILTERS.get(op.get("op"))
+        flt = FILTERS.get(op.get("op", ""))
         if flt is None:
             raise ValueError(f"unknown filter {op.get('op')!r}")
         out = _apply_keeping_alpha(flt, out, op.get("params") or {})
@@ -259,7 +259,9 @@ def _ela(img: Image.Image, params: dict[str, Any]) -> dict[str, Any]:
     buf.seek(0)
     resaved = Image.open(buf).convert("RGB")
     diff = ImageChops.difference(base, resaved)
-    peak = max((hi for _, hi in diff.getextrema()), default=1) or 1
+    # diff is RGB, so getextrema() returns a (lo, hi) pair per band, not a single
+    # pair — mypy only sees the grayscale overload here.
+    peak = max((hi for _, hi in diff.getextrema()), default=1) or 1  # type: ignore[misc]
     amplified = ImageEnhance.Brightness(diff).enhance(255.0 / peak)
     out = io.BytesIO()
     amplified.save(out, "PNG")
@@ -338,7 +340,9 @@ def probe(case: Case, rel_path: str) -> dict[str, Any]:
         )
         if proc.returncode == 0:
             data = json.loads(proc.stdout or b"{}")
-            stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+            stream: dict[str, Any] = next(
+                (s for s in data.get("streams", []) if s.get("codec_type") == "video"), {}
+            )
             info.update(
                 width=stream.get("width"),
                 height=stream.get("height"),
@@ -628,7 +632,8 @@ def _perspective_coeffs(dst_quad: list[list[float]], src_quad: list[list[float]]
     PIL samples the *output* pixel and needs the matching *input* coordinate, so we
     solve for the map from destination (canvas) corners to source-image corners.
     """
-    matrix, rhs = [], []
+    matrix: list[list[float]] = []
+    rhs: list[float] = []
     for (x, y), (u, v) in zip(dst_quad, src_quad):
         matrix.append([x, y, 1, 0, 0, 0, -u * x, -u * y])
         matrix.append([0, 0, 0, x, y, 1, -v * x, -v * y])
@@ -673,11 +678,15 @@ def _compose_canvas(
         footprint = img.getchannel("A") if img.mode == "RGBA" else Image.new("L", img.size, 255)
         img = img.convert("RGB")
         w, h = img.size
-        src_corners = [[0, 0], [w, 0], [w, h], [0, h]]
+        src_corners = [[0.0, 0.0], [float(w), 0.0], [float(w), float(h)], [0.0, float(h)]]
         quad = [[float(x) * scale, float(y) * scale] for x, y in node["quad"]]
         coeffs = _perspective_coeffs(quad, src_corners)
-        warped = img.transform((width, height), Image.PERSPECTIVE, coeffs, Image.BICUBIC)
-        mask = footprint.transform((width, height), Image.PERSPECTIVE, coeffs, Image.BILINEAR)
+        warped = img.transform(
+            (width, height), Image.Transform.PERSPECTIVE, coeffs, Image.Resampling.BICUBIC
+        )
+        mask = footprint.transform(
+            (width, height), Image.Transform.PERSPECTIVE, coeffs, Image.Resampling.BILINEAR
+        )
         canvas.paste(warped, (0, 0), mask)
         sources.append(rel)
     return canvas, sources

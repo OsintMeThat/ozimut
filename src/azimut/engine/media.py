@@ -80,9 +80,9 @@ def make_thumbnail(media_path: Path, thumb_path: Path) -> bool:
     try:
         if kind == "image":
             with Image.open(media_path) as img:
-                img = img.convert("RGB")
-                img.thumbnail((THUMB_MAX, THUMB_MAX))
-                img.save(thumb_path, "JPEG", quality=82)
+                rgb = img.convert("RGB")
+                rgb.thumbnail((THUMB_MAX, THUMB_MAX))
+                rgb.save(thumb_path, "JPEG", quality=82)
             return True
         if kind == "video" and ffmpeg_available():
             subprocess.run(
@@ -324,7 +324,7 @@ def _gallery_dl_item(file_url: str, kwdict: dict[str, Any]) -> dict[str, Any]:
         "title": first_line or filename,
         "description": content or None,
         "uploader": author.get("nick") or author.get("name"),
-        "upload_date": date.strftime("%Y%m%d") if hasattr(date, "strftime") else None,
+        "upload_date": date.strftime("%Y%m%d") if date is not None and hasattr(date, "strftime") else None,
     }
 
 

@@ -345,7 +345,7 @@ def provider_key_bad(key_id: str, settings: dict[str, Any] | None = None) -> boo
     """True when the key's last recorded verdict was a failure."""
     settings = settings or load_settings()
     status = (settings.get("provider_status") or {}).get(key_id)
-    return bool(status) and not status.get("ok", True)
+    return bool(status) and not (status or {}).get("ok", True)
 
 
 def ingest_token(rotate: bool = False) -> str:

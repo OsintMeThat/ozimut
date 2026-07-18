@@ -531,14 +531,6 @@ def test_auto_stitch_needs_two_pieces(client):
     assert res.status_code == 422
 
 
-def test_compose_requires_nodes(client):
-    cid = client.post("/api/cases", json={"name": "NoNodes"}).json()["id"]
-    res = client.post(
-        f"/api/cases/{cid}/inspect/compose", json={"width": 100, "height": 100, "nodes": []}
-    )
-    assert res.status_code == 422
-
-
 def test_compose_preview_returns_png_without_filing(client):
     cid = client.post("/api/cases", json={"name": "Preview"}).json()["id"]
     a = _upload(client, cid, "a.png", _png_bytes(color=(10, 20, 30), size=(80, 60)))

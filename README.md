@@ -99,6 +99,14 @@ Frontend development (hot reload, proxied API):
 cd frontend && npm run dev          # UI on :5173
 ```
 
+Checks (CI runs these on every push):
+
+```bash
+uv run ruff check src tests   # lint
+uv run mypy                    # type-check the backend
+cd frontend && npm run check   # svelte-check (blocks on errors)
+```
+
 ### Capture extension (optional)
 
 A browser extension (Chrome/Edge and Firefox) captures external map sites

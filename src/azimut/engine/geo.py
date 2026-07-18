@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
@@ -45,10 +44,13 @@ def parse_coords(text: str) -> tuple[float, float] | None:
             if hemi.upper() in "SW":
                 value = -value
             values.append((value, hemi.upper()))
-        lat = next((v for v, h in values if h in "NS"), None)
-        lon = next((v for v, h in values if h in "EW"), None)
-        if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
-            return lat, lon
+        dms_lat = next((v for v, h in values if h in "NS"), None)
+        dms_lon = next((v for v, h in values if h in "EW"), None)
+        if (
+            dms_lat is not None and dms_lon is not None
+            and -90 <= dms_lat <= 90 and -180 <= dms_lon <= 180
+        ):
+            return dms_lat, dms_lon
 
     # MGRS: "31U DQ 48250 11951" (spacing optional)
     mgrs = coords.parse_mgrs(text)

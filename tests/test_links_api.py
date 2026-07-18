@@ -43,7 +43,7 @@ def _entity(client, cid, **attrs):
 
 def _links(client, cid, type_=None):
     links = _case(client, cid)["links"]
-    return [l for l in links if type_ is None or l["type"] == type_]
+    return [lk for lk in links if type_ is None or lk["type"] == type_]
 
 
 def _new_case(client, name):
@@ -76,7 +76,7 @@ def test_proof_save_links_to_its_panels(client):
     _save_proof(client, cid, "Strike proof", [a, b])
 
     proof = _entity(client, cid, spec="proofs/strike-proof.json")
-    targets = {l["to"] for l in _links(client, cid, "derived-from") if l["from"] == proof["id"]}
+    targets = {lk["to"] for lk in _links(client, cid, "derived-from") if lk["from"] == proof["id"]}
     assert targets == {_entity(client, cid, path=a)["id"], _entity(client, cid, path=b)["id"]}
 
 
@@ -130,7 +130,7 @@ def test_post_save_links_to_its_proof_and_media(client):
     )
 
     post = _entity(client, cid, draft="exports/thread.json")
-    targets = {l["to"] for l in _links(client, cid, "derived-from") if l["from"] == post["id"]}
+    targets = {lk["to"] for lk in _links(client, cid, "derived-from") if lk["from"] == post["id"]}
     assert targets == {
         _entity(client, cid, spec="proofs/p.json")["id"],
         _entity(client, cid, path=a)["id"],
@@ -173,12 +173,12 @@ def test_a_derived_media_links_to_its_sources(client):
     res = _compose_two(client, cid, a, b)
 
     collage = _entity(client, cid, path=res["item"]["path"])
-    targets = {l["to"] for l in _links(client, cid, "derived-from") if l["from"] == collage["id"]}
+    targets = {lk["to"] for lk in _links(client, cid, "derived-from") if lk["from"] == collage["id"]}
     assert targets == {_entity(client, cid, path=a)["id"], _entity(client, cid, path=b)["id"]}
     assert all(
-        l["provenance"]["by"] == "inspect"
-        for l in _links(client, cid, "derived-from")
-        if l["from"] == collage["id"]
+        lk["provenance"]["by"] == "inspect"
+        for lk in _links(client, cid, "derived-from")
+        if lk["from"] == collage["id"]
     )
 
 
@@ -196,7 +196,7 @@ def test_a_deduped_derivative_still_gets_its_chain_once(client):
     assert second["duplicate"] is True
     assert second["entity"]["id"] == first["entity"]["id"]
     collage_id = first["entity"]["id"]
-    assert len([l for l in _links(client, cid, "derived-from") if l["from"] == collage_id]) == 2
+    assert len([lk for lk in _links(client, cid, "derived-from") if lk["from"] == collage_id]) == 2
 
 
 def test_upload_and_download_emit_no_links(client):

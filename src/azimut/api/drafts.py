@@ -121,7 +121,7 @@ def save_draft(case_id: str, body: DraftIn) -> dict[str, Any]:
         case,
         entity_id,
         link_engine.DERIVED_FROM,
-        [body.state.get("proofPng"), body.state.get("mediaPath")],
+        [p for p in (body.state.get("proofPng"), body.state.get("mediaPath")) if p],
         by="post-composer",
     )
 
