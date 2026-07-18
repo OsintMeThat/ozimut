@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, afterEach } from 'vitest';
-import { extensionVersion, captureTab, onActivated } from './extBridge.js';
+import { extensionVersion, extensionOutdated, captureTab, onActivated } from './extBridge.js';
 
 // The bridge protocol is the app's only path to widget pixels, so what these
 // tests pin is the contract: detection reads the content script's marker, and
@@ -16,6 +16,20 @@ describe('extensionVersion', () => {
     expect(extensionVersion()).toBe(null);
     document.documentElement.dataset.azimutCaptureExtension = '0.1.0';
     expect(extensionVersion()).toBe('0.1.0');
+  });
+});
+
+describe('extensionOutdated', () => {
+  it('flags a newer bundled version against the installed one', () => {
+    expect(extensionOutdated('0.1.0', '0.2.0')).toBe(true);
+    expect(extensionOutdated('0.1.0', 'v0.1.1')).toBe(true);
+    expect(extensionOutdated('0.1.9', '0.1.10')).toBe(true); // numeric, not lexical
+  });
+  it('is false when equal, older, or either side is missing', () => {
+    expect(extensionOutdated('0.1.0', '0.1.0')).toBe(false);
+    expect(extensionOutdated('0.2.0', '0.1.0')).toBe(false);
+    expect(extensionOutdated(null, '0.2.0')).toBe(false);
+    expect(extensionOutdated('0.1.0', '')).toBe(false);
   });
 });
 

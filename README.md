@@ -41,9 +41,14 @@ New in v0.1.1, a polish pass over the v1 tools:
 ## Install & run
 
 ```bash
-pip install azimut
-azimut            # starts on http://127.0.0.1:8477 and opens a browser tab
+pipx install azimut   # isolated app install; plain `pip install azimut` also works
+azimut                # starts on http://127.0.0.1:8477 and opens a browser tab
 ```
+
+Update with `pipx upgrade azimut`, remove with `pipx uninstall azimut`. Your
+cases and settings live under `~/Azimut` and are left untouched by both — an
+upgrade never makes you redo an investigation, and an uninstall never deletes
+your data (delete `~/Azimut` by hand if you also want the data gone).
 
 Azimut runs in a normal browser tab (Firefox/Chrome); there is no separate
 window. Closing the terminal it prints its URL into stops the app.
@@ -69,6 +74,11 @@ open:
 - **Windows**: SmartScreen shows "Windows protected your PC"; click **More
   info** → **Run anyway**.
 - **Linux**: mark it executable with `chmod +x azimut-linux-x86_64`.
+
+To update, **Settings → About → Check for updates** tells you when a newer
+release is out and links the download; replace the old file with the new one.
+To uninstall, delete the file. Either way `~/Azimut` stays put, so your cases
+open unchanged in the new version.
 
 Optional: install **ffmpeg** on your `PATH` for video thumbnails and video
 metadata (dimensions/duration). Everything else works without it.

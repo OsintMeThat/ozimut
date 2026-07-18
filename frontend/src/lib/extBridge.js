@@ -20,6 +20,22 @@ export function extensionVersion(doc = document) {
   return doc.documentElement.dataset.azimutCaptureExtension || null;
 }
 
+/**
+ * Is `bundled` a newer extension than `installed`? Numeric per-part compare, so
+ * 0.1.10 beats 0.1.9 and a `v` prefix or pre-release suffix doesn't fool it.
+ * False when either side is missing — nothing to update to, or nothing to
+ * update. Mirrors the app-side check in engine/updates.py.
+ */
+export function extensionOutdated(installed, bundled) {
+  if (!installed || !bundled) return false;
+  const parse = (v) => String(v).replace(/^v/i, '').split('.').map((n) => parseInt(n, 10) || 0);
+  const [a, b] = [parse(bundled), parse(installed)];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if ((a[i] || 0) !== (b[i] || 0)) return (a[i] || 0) > (b[i] || 0);
+  }
+  return false;
+}
+
 let seq = 0;
 
 /**

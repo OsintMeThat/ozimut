@@ -48,6 +48,9 @@
   let openedSession = $state(null);
   const sessionModal = $state({ open: false, mode: 'save', name: null, title: '', list: [], busy: false });
   let discardConfirm = $state(false);
+  // openSession fetches the spec then re-renders every frame and collage node
+  // one at a time — slow enough on a heavy session that the tool needs to say so.
+  let sessionLoading = $state(false);
 
   // A fresh, empty collage. A session can hold several — the Collage tab edits
   // one at a time (session.activeCollageId) and each is saved as its own PNG.
@@ -779,71 +782,76 @@
   }
 
   async function openSession(name) {
-    await ensureOps();
-    if (!mediaList.length) await refresh();
-    let spec;
+    sessionLoading = true;
+    sessionModal.open = false;
     try {
-      spec = await api.get(`/api/cases/${caseState.current.id}/inspect/sessions/${name}`);
-    } catch (e) {
-      toast(e.message, 'danger');
-      return;
-    }
-    resetSession();
-    const src = mediaList.find((m) => m.path === spec.source.path) ?? spec.source;
-    session.source = src;
-    try {
-      probeInfo = await api.get(
-        `/api/cases/${caseState.current.id}/inspect/probe?path=${encodeURIComponent(src.path)}`
-      );
-    } catch {
-      probeInfo = { kind: src.kind };
-    }
-    session.videoAdjust = spec.videoAdjust ?? adjustDefaults(videoFilters);
-    for (const f of spec.frames ?? []) {
+      await ensureOps();
+      if (!mediaList.length) await refresh();
+      let spec;
       try {
-        const url = await renderUrl(f.path, f.time, []);
-        session.frames.push({ ...f, url });
-      } catch {
-        /* skip a frame whose source is gone */
+        spec = await api.get(`/api/cases/${caseState.current.id}/inspect/sessions/${name}`);
+      } catch (e) {
+        toast(e.message, 'danger');
+        return;
       }
-    }
-    session.activeFrameId = spec.activeFrameId ?? session.frames[0]?.id ?? null;
-    // Back-compat: older sessions stored a single `collage`; newer ones an array.
-    const specCollages = spec.collages ?? (spec.collage ? [spec.collage] : []);
-    const collages = [];
-    for (const sc of specCollages) {
-      const nodes = [];
-      for (const n of sc.nodes ?? []) {
+      resetSession();
+      const src = mediaList.find((m) => m.path === spec.source.path) ?? spec.source;
+      session.source = src;
+      try {
+        probeInfo = await api.get(
+          `/api/cases/${caseState.current.id}/inspect/probe?path=${encodeURIComponent(src.path)}`
+        );
+      } catch {
+        probeInfo = { kind: src.kind };
+      }
+      session.videoAdjust = spec.videoAdjust ?? adjustDefaults(videoFilters);
+      for (const f of spec.frames ?? []) {
         try {
-          // frameOps = the snapshot without the collage crop; baseUrl feeds the
-          // crop editor, url is the (possibly cropped) piece shown on the canvas.
-          const frameOps = n.frameOps ?? n.save.ops ?? [];
-          const crop = n.crop ?? null;
-          const baseUrl = await renderUrl(n.save.path, n.save.time, frameOps);
-          const url = crop ? await renderUrl(n.save.path, n.save.time, n.save.ops) : baseUrl;
-          nodes.push({ ...n, frameOps, crop, baseUrl, url });
+          const url = await renderUrl(f.path, f.time, []);
+          session.frames.push({ ...f, url });
         } catch {
-          /* skip a node whose source is gone */
+          /* skip a frame whose source is gone */
         }
       }
-      collages.push({
-        id: sc.id ?? uid('cl'),
-        name: sc.name ?? `Collage ${collages.length + 1}`,
-        width: sc.width ?? 1600,
-        height: sc.height ?? 800,
-        background: sc.background ?? '#12141c',
-        transparent: sc.transparent ?? false,
-        nodes,
-      });
+      session.activeFrameId = spec.activeFrameId ?? session.frames[0]?.id ?? null;
+      // Back-compat: older sessions stored a single `collage`; newer ones an array.
+      const specCollages = spec.collages ?? (spec.collage ? [spec.collage] : []);
+      const collages = [];
+      for (const sc of specCollages) {
+        const nodes = [];
+        for (const n of sc.nodes ?? []) {
+          try {
+            // frameOps = the snapshot without the collage crop; baseUrl feeds the
+            // crop editor, url is the (possibly cropped) piece shown on the canvas.
+            const frameOps = n.frameOps ?? n.save.ops ?? [];
+            const crop = n.crop ?? null;
+            const baseUrl = await renderUrl(n.save.path, n.save.time, frameOps);
+            const url = crop ? await renderUrl(n.save.path, n.save.time, n.save.ops) : baseUrl;
+            nodes.push({ ...n, frameOps, crop, baseUrl, url });
+          } catch {
+            /* skip a node whose source is gone */
+          }
+        }
+        collages.push({
+          id: sc.id ?? uid('cl'),
+          name: sc.name ?? `Collage ${collages.length + 1}`,
+          width: sc.width ?? 1600,
+          height: sc.height ?? 800,
+          background: sc.background ?? '#12141c',
+          transparent: sc.transparent ?? false,
+          nodes,
+        });
+      }
+      if (!collages.length) collages.push(makeCollage('Collage 1'));
+      session.collages = collages;
+      session.activeCollageId =
+        collages.find((c) => c.id === spec.activeCollageId)?.id ?? collages[0].id;
+      openedSession = { name, title: spec.title || name };
+      activeTab = src.kind === 'video' ? 'selection' : 'frame';
+      anchorCollageHistory();
+    } finally {
+      sessionLoading = false;
     }
-    if (!collages.length) collages.push(makeCollage('Collage 1'));
-    session.collages = collages;
-    session.activeCollageId =
-      collages.find((c) => c.id === spec.activeCollageId)?.id ?? collages[0].id;
-    openedSession = { name, title: spec.title || name };
-    activeTab = src.kind === 'video' ? 'selection' : 'frame';
-    sessionModal.open = false;
-    anchorCollageHistory();
   }
 
   function discardSession() {
@@ -902,6 +910,11 @@
       <Icon name="inspect" size={40} />
       <p>Open a case and add media to start inspecting.</p>
       <button class="btn" onclick={() => (uiState.tool = 'media')}>Go to Media Library</button>
+    </div>
+  {:else if sessionLoading}
+    <div class="empty">
+      <span class="spinner"></span>
+      <p>Loading session…</p>
     </div>
   {:else if !session.source}
     <div class="empty">
@@ -1119,11 +1132,11 @@
             <div class="session-list">
               {#each sessionModal.list as s (s.name)}
                 <div class="session-row">
-                  <button class="session-open" onclick={() => openSession(s.name)}>
+                  <button class="session-open" disabled={sessionLoading} onclick={() => openSession(s.name)}>
                     <span class="session-title">{s.title}</span>
                     <span class="session-meta">{s.frames} frame{s.frames === 1 ? '' : 's'} · {s.collage} collage piece{s.collage === 1 ? '' : 's'}</span>
                   </button>
-                  <button class="btn btn-ghost btn-xs" onclick={() => deleteSession(s.name)} aria-label="Delete session">
+                  <button class="btn btn-ghost btn-xs" disabled={sessionLoading} onclick={() => deleteSession(s.name)} aria-label="Delete session">
                     <Icon name="trash" size={14} />
                   </button>
                 </div>
@@ -1178,6 +1191,19 @@
   .hint-mid p {
     max-width: 260px;
     font-size: var(--fs-sm);
+  }
+  .spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
   .gone-banner {
     display: flex;
@@ -1418,6 +1444,10 @@
   }
   .session-open:hover {
     border-color: var(--accent);
+  }
+  .session-open:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
   .session-title {
     font-size: var(--fs-sm);

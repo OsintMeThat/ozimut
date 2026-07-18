@@ -19,8 +19,10 @@ It serves two flows:
   whatever Azimut learns to recognize later. Click the toolbar icon (or
   `Alt+Shift+A`): a popup shows what Azimut parsed from the URL (correctable),
   a case picker, and one button — drag the area to capture. The result
-  appears in the open app instantly. On any other kind of site the extension
-  refuses: it is for maps only.
+  appears in the open app instantly.
+- **Any other page** — no screenshot (capture is maps only), but the popup
+  offers to file the page as a **bookmark**: a saved link with its title and
+  source site, nothing downloaded. It lands in the case as a `bookmark` entity.
 - **Azimut's own Google (Maps JS) basemap** — the app's Capture button asks
   the extension for the tab's pixels instead of prompting for a screen share.
   No pairing needed for this: the app files everything itself, same-origin.

@@ -10,10 +10,13 @@
   } from '../lib/state.svelte.js';
   import { DEFAULT_W } from '../lib/sidebar.js';
   import { buildTree, subtreeCount, flattenPaths, folderOf } from '../lib/folderTree.js';
-  import { chainOf, deletePlan, DEPENDS_ON } from '../lib/chain.js';
+  import { assignFolder as fileEntity } from '../lib/filing.js';
+  import { deletePlan } from '../lib/chain.js';
+  import { openEntity, gotoCapture, ENTITY_TOOL } from '../lib/navigate.js';
   import Icon from './Icon.svelte';
   import Modal from './Modal.svelte';
   import ConfirmDialog from './ConfirmDialog.svelte';
+  import EntityDetails from './EntityDetails.svelte';
 
   const ENTITY_ICONS = {
     person: 'user',
@@ -33,11 +36,6 @@
     vehicle: 'grip',
     note: 'note',
     'inspect-session': 'inspect',
-  };
-
-  // Tool to open when clicking a given entity type
-  const ENTITY_TOOL = {
-    media: 'media', proof: 'proof', place: 'satellite', post: 'post', 'inspect-session': 'inspect',
   };
 
   // Entity types backed by a file on disk — deleting them everywhere drops the file.
@@ -115,71 +113,8 @@
     openEntity(entity);
   }
 
-  function openEntity(entity) {
-    if (entity.type === 'proof') {
-      // load the proof spec into the composer, then switch tab
-      const spec = entity.attrs?.spec ?? '';
-      const name = spec.replace(/^proofs\//, '').replace(/\.json$/, '');
-      if (name) uiState.openProof = name;
-      uiState.tool = 'proof';
-      return;
-    }
-    if (entity.type === 'post') {
-      // load the draft into the Post Composer, then switch tab
-      const draft = entity.attrs?.draft ?? '';
-      const name = draft.replace(/^exports\//, '').replace(/\.json$/, '');
-      if (name) uiState.openDraft = name;
-      uiState.tool = 'post';
-      return;
-    }
-    if (entity.type === 'inspect-session') {
-      // reopen the whole Inspect workspace (frames, adjustments, collage)
-      const spec = entity.attrs?.spec ?? '';
-      const name = spec.replace(/^inspect\//, '').replace(/\.json$/, '');
-      if (name) uiState.openInspect = name;
-      uiState.tool = 'inspect';
-      return;
-    }
-    if (entity.type === 'place') {
-      // fly the Satellite map to the point at the capture's own zoom/bearing
-      const lat = Number(entity.attrs?.lat);
-      const lon = Number(entity.attrs?.lon);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        uiState.gotoCoords = {
-          lat,
-          lon,
-          zoom: Number(entity.attrs?.zoom),
-          bearing: Number(entity.attrs?.bearing),
-        };
-      }
-      uiState.tool = 'satellite';
-      return;
-    }
-    if (entity.type === 'media') {
-      // switch to the Media Library and flag the item so it's highlighted there
-      if (entity.attrs?.path) uiState.focusMedia = entity.attrs.path;
-      uiState.tool = 'media';
-      return;
-    }
-    const tool = ENTITY_TOOL[entity.type];
-    if (tool) uiState.tool = tool;
-  }
-
-  // Fly the Satellite map to a capture's recorded coordinates (its marker),
-  // matching its own zoom/bearing — the capture stays an image, this just
-  // navigates. Mirrors the "Go to" button in the Satellite panel.
-  function gotoCapture(entity) {
-    const lat = Number(entity.attrs?.lat);
-    const lon = Number(entity.attrs?.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-    uiState.gotoCoords = {
-      lat,
-      lon,
-      zoom: Number(entity.attrs?.zoom),
-      bearing: Number(entity.attrs?.bearing),
-    };
-    uiState.tool = 'satellite';
-  }
+  // openEntity / gotoCapture live in lib/navigate.js — the case sidebar and the
+  // Details editor send an analyst to the same place.
 
   // ── My work: the analyst's own nested folder tree ('/'-separated paths) ────
   let newFolder = $state(''); // top-level create input
@@ -250,20 +185,11 @@
     await createFolder(parent ? `${parent}/${name}` : name);
   }
 
-  // File (or unfile, with folder='') an entity into a My-work folder. Media
-  // keeps its sidecar in sync via its own endpoint.
+  // File (or unfile, with folder='') an entity into a My-work folder, then
+  // refresh. Routing lives in lib/filing.js so the desktop organizer files
+  // items the same way.
   async function assignFolder(entity, folder) {
-    const val = folder || '';
-    if ((entity.type === 'media' || entity.type === 'capture') && entity.attrs?.path) {
-      await api.patch(`/api/cases/${caseState.current.id}/media`, {
-        path: entity.attrs.path,
-        folder: val,
-      });
-    } else {
-      await api.patch(`/api/cases/${caseState.current.id}/entities/${entity.id}`, {
-        attrs: { folder: val },
-      });
-    }
+    await fileEntity(caseState.current.id, entity, folder);
     await reloadCase();
   }
 
@@ -364,120 +290,16 @@
     };
   }
 
-  // ── details panel (selection info + editor, docs/UI.md §4) ────────────────
+  // ── details panel (docs/UI.md §4) ─────────────────────────────────────────
+  // The editor body lives in EntityDetails.svelte (shared with the Media
+  // Library modal). The sidebar only tracks which entity is selected and
+  // scrolls it into view.
   let infoEntity = $state(null);
-  let infoData = $state(null); // resolved media/satellite listing item (or null)
-  let infoLoading = $state(false);
-  // editable fields (title + notes), like the dedicated tool's editor
-  let infoTitle = $state('');
-  let infoNotes = $state('');
-  let infoFolder = $state('');
-  let infoSaving = $state(false);
   let detailsEl = $state(null);
-  const detailsFilePath = $derived(
-    infoData?.path ?? (infoEntity?.type === 'capture' ? infoEntity.attrs?.path : null)
-  );
-  // Every artifact type gets the title/notes editor (UI.md §4). Media and
-  // captures go through their sidecar PATCH; the rest edit the entity itself.
-  const EDITABLE = new Set([
-    'capture',
-    'place',
-    'media',
-    'proof',
-    'post',
-    'inspect-session',
-    'note',
-  ]);
 
-  // The derivation chain around the selection: what it was made from, what was
-  // made from it, and the sources it has outlived (ONTOLOGY §3). An entity with
-  // no chain at all hides the section rather than showing an empty shell.
-  const chain = $derived(infoEntity ? chainOf(entities, links, infoEntity.id) : null);
-  const ENTITY_ICON = {
-    media: 'media',
-    capture: 'satellite',
-    place: 'pin',
-    proof: 'proof',
-    post: 'post',
-    'inspect-session': 'inspect',
-    note: 'note',
-  };
-
-  async function openInfo(entity) {
+  function openInfo(entity) {
     infoEntity = entity;
-    infoData = null;
-    infoTitle = entity.label ?? '';
-    infoNotes = entity.attrs?.notes ?? '';
-    infoFolder = folderOf(entity) ?? '';
     requestAnimationFrame(() => detailsEl?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
-    const endpoint =
-      entity.type === 'media' ? 'media' : entity.type === 'capture' ? 'satellite' : null;
-    if (endpoint && entity.attrs?.path) {
-      infoLoading = true;
-      try {
-        const list = await api.get(`/api/cases/${caseState.current.id}/${endpoint}`);
-        infoData = list.find((m) => m.path === entity.attrs.path) ?? null;
-        if (infoData) {
-          infoTitle = infoData.title ?? entity.label ?? '';
-          infoNotes = infoData.notes ?? infoNotes;
-        }
-      } catch {
-        infoData = null;
-      } finally {
-        infoLoading = false;
-      }
-    }
-  }
-
-  async function saveInfo() {
-    if (!infoEntity || infoSaving) return;
-    infoSaving = true;
-    const cid = caseState.current.id;
-    try {
-      if (infoEntity.type === 'capture') {
-        // the satellite PATCH keeps the sidecar (title/notes) and the mirrored
-        // entity label in sync — the same path the Satellite tool uses
-        await api.patch(`/api/cases/${cid}/satellite`, {
-          path: infoEntity.attrs.path,
-          title: infoTitle,
-          notes: infoNotes,
-        });
-      } else if (infoEntity.type === 'media') {
-        // the media PATCH writes the sidecar (title/notes) and mirrors the
-        // title onto the entity label, so the Media tab reflects it too
-        await api.patch(`/api/cases/${cid}/media`, {
-          path: infoEntity.attrs.path,
-          title: infoTitle.trim(),
-          notes: infoNotes,
-        });
-      } else if (EDITABLE.has(infoEntity.type)) {
-        // place (or any bare entity): retitle + note on the entity itself
-        await api.patch(`/api/cases/${cid}/entities/${infoEntity.id}`, {
-          label: infoTitle.trim() || infoEntity.label,
-          attrs: { notes: infoNotes.trim() },
-        });
-      }
-      // filing is part of the same Save: My work folder from the picker
-      if ((infoFolder.trim() || '') !== (folderOf(infoEntity) ?? '')) {
-        await assignFolder(infoEntity, infoFolder.trim());
-      }
-      await reloadCase();
-      // the panel stays open on the fresh entity (reload replaced the objects)
-      infoEntity = (caseState.current?.entities ?? []).find((x) => x.id === infoEntity.id) ?? null;
-      toast('Saved', 'ok', 1600);
-    } catch (e) {
-      toast(e.message, 'danger');
-    } finally {
-      infoSaving = false;
-    }
-  }
-
-  function fmtSize(bytes) {
-    if (bytes == null) return '';
-    if (bytes >= 1 << 30) return (bytes / (1 << 30)).toFixed(1) + ' GB';
-    if (bytes >= 1 << 20) return (bytes / (1 << 20)).toFixed(1) + ' MB';
-    if (bytes >= 1 << 10) return (bytes / (1 << 10)).toFixed(0) + ' KB';
-    return bytes + ' B';
   }
 
   // ── note entities ─────────────────────────────────────────────────────────
@@ -706,198 +528,25 @@
       {/if}
 
 
-      <!-- 4 · Details (selection info + editor — docs/UI.md §4) -->
+      <!-- 4 · Details (selection editor — docs/UI.md §4; shared body) -->
       {#if infoEntity}
         <div bind:this={detailsEl}>
-        <div class="section-head-row">
-          <div class="section-head static">
-            <Icon name="note" size={13} />
-            <span>Details</span>
+          <div class="section-head-row">
+            <div class="section-head static">
+              <Icon name="note" size={13} />
+              <span>Details</span>
+            </div>
+            <button class="btn btn-ghost btn-sm" title="Close details" onclick={() => (infoEntity = null)}>
+              <Icon name="x" size={13} />
+            </button>
           </div>
-          <button class="btn btn-ghost btn-sm" title="Close details" onclick={() => (infoEntity = null)}>
-            <Icon name="x" size={13} />
-          </button>
-        </div>
-        <div class="details">
-          {#if infoLoading}
-            <div class="info-loading">Loading…</div>
-          {/if}
-
-          {#if infoData?.kind === 'image' && infoData.thumbnail}
-            <div class="info-preview">
-              <img src={`/files/${caseState.current.id}/${infoData.path}`} alt={infoEntity.label} />
-            </div>
-          {:else if infoData?.kind === 'video'}
-            <div class="info-preview">
-              <!-- svelte-ignore a11y_media_has_caption -->
-              <video src={`/files/${caseState.current.id}/${infoData.path}`} controls preload="metadata"></video>
-            </div>
-          {:else if infoEntity.type === 'capture' && infoEntity.attrs?.path}
-            <div class="info-preview">
-              <img src={`/files/${caseState.current.id}/${infoEntity.attrs.path}`} alt={infoEntity.label} />
-            </div>
-          {/if}
-
-          {#if EDITABLE.has(infoEntity.type)}
-            <label class="modal-label" for="info-title">Title</label>
-            <input
-              id="info-title"
-              class="input"
-              bind:value={infoTitle}
-              placeholder={infoEntity.attrs?.coords ?? 'Title'}
+          <div class="details">
+            <EntityDetails
+              entityId={infoEntity.id}
+              onclose={() => (infoEntity = null)}
+              ondeleted={() => (infoEntity = null)}
             />
-          {:else}
-            <div class="details-title">{infoEntity.label}</div>
-          {/if}
-
-          <div class="info-rows">
-            <div class="info-row"><span class="info-k">Type</span><span>{infoEntity.type}</span></div>
-            {#if infoEntity.provenance?.by}
-              <div class="info-row"><span class="info-k">Created by</span><span>{infoEntity.provenance.by}</span></div>
-            {/if}
-            {#if infoEntity.provenance?.at}
-              <div class="info-row"><span class="info-k">Created</span><span class="mono">{infoEntity.provenance.at.slice(0, 10)}</span></div>
-            {/if}
-            {#if infoEntity.type === 'media' && infoData}
-              <div class="info-row"><span class="info-k">Kind</span><span>{infoData.kind}</span></div>
-              <div class="info-row"><span class="info-k">Size</span><span>{fmtSize(infoData.size)}</span></div>
-              {#if infoData.sha256}
-                <div class="info-row"><span class="info-k">SHA-256</span><span class="mono hash" title={infoData.sha256}>{infoData.sha256}</span></div>
-              {/if}
-              {#if infoData.source?.title}
-                <div class="info-row"><span class="info-k">Title</span><span>{infoData.source.title}</span></div>
-              {/if}
-              {#if infoData.source?.uploader}
-                <div class="info-row"><span class="info-k">Uploader</span><span>{infoData.source.uploader}</span></div>
-              {/if}
-              {#if infoData.source?.upload_date}
-                <div class="info-row"><span class="info-k">Published</span><span class="mono">{infoData.source.upload_date}</span></div>
-              {/if}
-              {#if infoData.source?.webpage_url ?? infoData.source?.url}
-                <div class="info-row">
-                  <span class="info-k">Source</span>
-                  <a class="mono src" href={infoData.source.webpage_url ?? infoData.source.url} target="_blank" rel="noreferrer">
-                    {infoData.source.webpage_url ?? infoData.source.url}
-                  </a>
-                </div>
-              {/if}
-            {:else if infoEntity.type === 'capture'}
-              {#if infoData?.provider_label}
-                <div class="info-row"><span class="info-k">Provider</span><span>{infoData.provider_label}</span></div>
-              {/if}
-              {#if infoEntity.attrs?.zoom != null}
-                <div class="info-row"><span class="info-k">Zoom</span><span>z{infoEntity.attrs.zoom}</span></div>
-              {/if}
-              {#if infoData?.fetched_at}
-                <div class="info-row"><span class="info-k">Captured</span><span class="mono">{infoData.fetched_at.slice(0, 10)}</span></div>
-              {/if}
-              {#if infoData?.imagery_date}
-                <div class="info-row"><span class="info-k">Imagery</span><span class="mono">{infoData.imagery_date}</span></div>
-              {/if}
-            {:else if infoEntity.attrs?.content}
-              <div class="info-note-body">{infoEntity.attrs.content}</div>
-            {/if}
-            {#if infoEntity.attrs?.coords}
-              <div class="info-row"><span class="info-k">Coords</span><span class="mono">{infoEntity.attrs.coords}</span></div>
-            {/if}
           </div>
-
-          <!-- derivation chain: click a row to walk to that entity's details -->
-          {#if chain && !chain.empty}
-            <div class="chain">
-              {#if chain.sources.length || chain.lost.length}
-                <div class="chain-h">Made from</div>
-                {#each chain.sources as { entity, type } (entity.id)}
-                  <button class="chain-row" onclick={() => openInfo(entity)}>
-                    <Icon name={ENTITY_ICON[entity.type] ?? 'file'} size={12} />
-                    <span class="chain-label">{entity.label}</span>
-                    {#if type === DEPENDS_ON}
-                      <span class="chain-tag" title="This is a view over that item — it cannot outlive it">needs</span>
-                    {/if}
-                  </button>
-                {/each}
-                {#each chain.lost as lost (lost.path)}
-                  <div class="chain-row gone" title={`Deleted on ${lost.at?.slice(0, 10) ?? 'an unknown date'}${lost.sha256 ? ` · sha256 ${lost.sha256}` : ''}`}>
-                    <Icon name="alert" size={12} />
-                    <span class="chain-label">{lost.label ?? lost.path}</span>
-                    <span class="chain-tag">deleted</span>
-                  </div>
-                {/each}
-                {#each chain.lost as lost (lost.path + '-src')}
-                  {#if lost.source_url}
-                    <a class="chain-src mono" href={lost.source_url} target="_blank" rel="noreferrer">{lost.source_url}</a>
-                  {/if}
-                {/each}
-              {/if}
-              {#if chain.dependents.length}
-                <div class="chain-h">Used by</div>
-                {#each chain.dependents as { entity, type } (entity.id)}
-                  <button class="chain-row" onclick={() => openInfo(entity)}>
-                    <Icon name={ENTITY_ICON[entity.type] ?? 'file'} size={12} />
-                    <span class="chain-label">{entity.label}</span>
-                    {#if type === DEPENDS_ON}
-                      <span class="chain-tag warn" title="Deleting this item deletes that one too">goes with it</span>
-                    {/if}
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-
-          {#if EDITABLE.has(infoEntity.type)}
-            <label class="modal-label" for="info-notes">Notes</label>
-            <textarea
-              id="info-notes"
-              class="textarea"
-              rows="3"
-              bind:value={infoNotes}
-              placeholder="Add observations, links, context…"
-            ></textarea>
-          {/if}
-
-          <label class="modal-label" for="info-folder">Folder (My work)</label>
-          <input
-            id="info-folder"
-            class="input"
-            bind:value={infoFolder}
-            placeholder="none"
-            list="info-folder-suggestions"
-          />
-          <datalist id="info-folder-suggestions">
-            {#each allFolders as f (f)}<option value={f}></option>{/each}
-          </datalist>
-
-          <div class="details-actions">
-            {#if detailsFilePath}
-              <a class="btn btn-ghost btn-sm" href={`/files/${caseState.current.id}/${detailsFilePath}`} target="_blank" rel="noreferrer">
-                <Icon name="external" size={13} /> Open file
-              </a>
-            {/if}
-            {#if ENTITY_TOOL[infoEntity.type]}
-              <button class="btn btn-ghost btn-sm" onclick={() => openEntity(infoEntity)}>
-                <Icon name="arrowRight" size={13} /> Open in tool
-              </button>
-            {/if}
-            {#if infoEntity.type === 'capture' && infoEntity.attrs?.lat != null}
-              <button class="btn btn-ghost btn-sm" onclick={() => gotoCapture(infoEntity)}>
-                <Icon name="crosshair" size={13} /> Go to coords
-              </button>
-            {/if}
-          </div>
-          <div class="details-actions">
-            <button
-              class="btn btn-ghost btn-sm del"
-              title="Delete everywhere: removes the item and its file(s) from the case"
-              onclick={() => askDeleteEverywhere(infoEntity, () => (infoEntity = null))}
-            >
-              <Icon name="trash" size={13} /> Delete
-            </button>
-            <div style="flex:1"></div>
-            <button class="btn btn-primary btn-sm" onclick={saveInfo} disabled={infoSaving}>
-              {infoSaving ? 'Saving…' : 'Save'}
-            </button>
-          </div>
-        </div>
         </div>
       {/if}
 
@@ -1272,86 +921,6 @@
     border-bottom: 1px solid var(--border);
     font-size: var(--fs-sm);
   }
-  .details-title {
-    font-weight: 600;
-    margin-bottom: 6px;
-    overflow-wrap: anywhere;
-  }
-  .details-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-    margin-top: 8px;
-  }
-  .details-actions .del { color: var(--danger); }
   .note-content { width: 100%; resize: vertical; font-family: var(--font-mono); font-size: var(--fs-xs); }
   .modal-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
-  /* info modal */
-  .info-loading { font-size: var(--fs-sm); color: var(--text-3); padding: 6px 0; }
-  .info-preview {
-    border-radius: var(--r);
-    overflow: hidden;
-    background: var(--bg-2);
-    margin-bottom: 14px;
-    max-height: 240px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .info-preview img, .info-preview video { max-width: 100%; max-height: 240px; object-fit: contain; display: block; }
-  .info-rows { display: flex; flex-direction: column; gap: 6px; }
-  .info-row { display: flex; gap: 10px; font-size: var(--fs-sm); align-items: baseline; min-width: 0; }
-  .info-k { color: var(--text-3); font-size: var(--fs-xs); min-width: 68px; flex-shrink: 0; }
-  .hash { font-size: 11px; word-break: break-all; color: var(--text-2); }
-  .src { font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .info-note-body { white-space: pre-wrap; font-size: var(--fs-sm); color: var(--text-2); }
-
-  /* derivation chain rows (ONTOLOGY §3) */
-  .chain { margin-top: 14px; display: flex; flex-direction: column; gap: 2px; }
-  .chain-h {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin: 6px 0 3px;
-  }
-  .chain-row {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    width: 100%;
-    padding: 5px 6px;
-    border: 0;
-    border-radius: var(--r-sm);
-    background: transparent;
-    color: var(--text-2);
-    font-size: var(--fs-sm);
-    text-align: left;
-    min-width: 0;
-  }
-  button.chain-row { cursor: pointer; }
-  button.chain-row:hover { background: var(--bg-2); color: var(--text-1); }
-  .chain-row.gone { color: var(--text-3); }
-  .chain-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .chain-tag {
-    flex-shrink: 0;
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 999px;
-    background: var(--bg-2);
-    color: var(--text-3);
-  }
-  .chain-tag.warn {
-    background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
-    color: color-mix(in srgb, var(--danger, #e5484d) 80%, var(--text-2));
-  }
-  .chain-src {
-    font-size: 10px;
-    color: var(--text-3);
-    padding: 0 6px 4px 25px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
 </style>

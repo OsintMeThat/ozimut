@@ -22,6 +22,7 @@ treatment the widget screenshot endpoint applies.
 from __future__ import annotations
 
 import io
+import json
 import secrets
 import zipfile
 from datetime import datetime, timezone
@@ -266,6 +267,39 @@ async def ingest_screenshot(
     }
 
 
+@router.post("/bookmark", dependencies=[Depends(require_token)])
+def ingest_bookmark(
+    url: str = Form(min_length=1, max_length=4000),
+    case_id: str = Form(default=""),
+    title: str = Form(default="", max_length=200),
+) -> dict[str, Any]:
+    """File a web page as a ``bookmark`` entity — a saved link, no screenshot.
+
+    The capture flow is maps-only (legal rails); this is the other half of the
+    extension popup, offered when the open page is *not* a recognized map site.
+    Nothing is fetched: we store the URL the user is already on, its title and
+    the source site — a pointer, not a copy. An empty ``case_id`` opens a fresh
+    scratch session, the same as a screenshot ingest.
+    """
+    split = urlsplit(url)
+    if split.scheme not in ("http", "https") or not split.hostname:
+        raise HTTPException(status_code=422, detail="bookmark needs an http(s) URL")
+
+    case = get_case(case_id) if case_id else Case.create("Scratch session", scratch=True)
+    label = title.strip() or split.hostname
+    entity = case.add_entity(
+        "bookmark",
+        label,
+        {"url": url, "site": split.hostname, "folder": ""},
+        by="ingest",
+    )
+    events.publish(
+        {"type": "bookmark", "case_id": case.id, "entity_id": entity["id"],
+         "title": label, "url": url}
+    )
+    return {"entity_id": entity["id"], "case_id": case.id, "title": label, "url": url}
+
+
 # ---- extension download: the packaged source, zipped on request ---------------
 
 # Repo checkout first (development), then the copy hatchling ships inside the
@@ -285,6 +319,22 @@ def _extension_dir() -> Path | None:
         if (candidate / "manifest.json").is_file():
             return candidate
     return None
+
+
+def bundled_extension_version() -> str | None:
+    """The ``version`` of the extension this Azimut build ships. Settings
+    compares it to the version stamped by the *installed* extension
+    (lib/extBridge.js) so it can flag "an update is bundled — re-download and
+    reload". None if no extension is bundled (unusual builds)."""
+    src = _extension_dir()
+    if src is None:
+        return None
+    try:
+        manifest = json.loads((src / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    version = manifest.get("version")
+    return str(version) if version else None
 
 
 @router.get("/extension.zip")

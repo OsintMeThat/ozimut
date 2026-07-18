@@ -5,6 +5,7 @@
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import EntityDetails from '../components/EntityDetails.svelte';
 
   const KIND_ICONS = { image: 'image', video: 'video', audio: 'audio', file: 'file' };
 
@@ -61,11 +62,8 @@
     })
   );
 
-  // --- info/edit modal ---
-  let editItem = $state(null);
-  let editNotes = $state('');
-  let editTitle = $state('');
-  let editSaving = $state(false);
+  // --- details modal (shared EntityDetails, keyed by the file's entity id) ---
+  let infoEntityId = $state(null);
 
   // --- lightbox (←/→ flips through the filtered images) ---
   let lightboxItem = $state(null);
@@ -259,44 +257,18 @@
     return bytes + ' B';
   }
 
-  function fmtDate(iso) {
-    if (!iso) return '';
-    return iso.slice(0, 10);
-  }
-
   function onDrop(e) {
     e.preventDefault();
     dragOver = false;
     importFiles(e.dataTransfer.files);
   }
 
-  // --- info modal actions ---
+  // Open the shared details editor (same body as the case sidebar) for this
+  // file's case entity — full provenance, derivation chain, title/notes/folder.
   function openInfo(item) {
-    editItem = item;
-    editNotes = item.notes ?? '';
-    editTitle = item.title ?? '';
-  }
-
-  async function saveInfo() {
-    if (!editItem) return;
-    editSaving = true;
-    try {
-      const updated = await api.patch(`/api/cases/${caseState.current.id}/media`, {
-        path: editItem.path,
-        notes: editNotes,
-        title: editTitle,
-      });
-      const idx = items.findIndex((i) => i.path === editItem.path);
-      if (idx !== -1) items[idx] = updated;
-      editItem = null;
-      // mirror the title/notes onto the case sidebar entity live
-      await reloadCase();
-      toast('Saved', 'ok', 1600);
-    } catch (e) {
-      toast(e.message, 'danger');
-    } finally {
-      editSaving = false;
-    }
+    const ent = (caseState.current?.entities ?? []).find((e) => e.attrs?.path === item.path);
+    if (ent) infoEntityId = ent.id;
+    else toast('This file has no case entity yet', 'warn');
   }
 </script>
 
@@ -578,123 +550,15 @@
   </Modal>
 {/if}
 
-<!-- info / edit modal -->
-{#if editItem}
-  <Modal title={editTitle.trim() || editItem.filename} onclose={() => (editItem = null)} width="520px">
-    <!-- preview -->
-    {#if editItem.kind === 'image' && editItem.thumbnail}
-      <div class="modal-preview">
-        <img
-          src={`/files/${caseState.current.id}/${editItem.path}`}
-          alt={editItem.filename}
-        />
-      </div>
-    {:else if editItem.kind === 'video'}
-      <div class="modal-preview">
-        <!-- svelte-ignore a11y_media_has_caption -->
-        <video
-          src={`/files/${caseState.current.id}/${editItem.path}`}
-          controls
-          preload="metadata"
-        ></video>
-      </div>
-    {/if}
-
-    <!-- metadata section -->
-    <div class="info-rows">
-      <div class="info-row">
-        <span class="info-label">Kind</span>
-        <span>{editItem.kind}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Size</span>
-        <span>{fmtSize(editItem.size)}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">Added</span>
-        <span>{fmtDate(editItem.added_at)}</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">SHA-256</span>
-        <span class="mono hash" title={editItem.sha256}>{editItem.sha256}</span>
-      </div>
-      {#if editItem.source?.type === 'download'}
-        {#if editItem.source.title}
-          <div class="info-row">
-            <span class="info-label">Title</span>
-            <span>{editItem.source.title}</span>
-          </div>
-        {/if}
-        {#if editItem.source.uploader}
-          <div class="info-row">
-            <span class="info-label">Uploader</span>
-            <span>{editItem.source.uploader}</span>
-          </div>
-        {/if}
-        {#if editItem.source.upload_date}
-          <div class="info-row">
-            <span class="info-label">Published</span>
-            <span class="mono">{editItem.source.upload_date}</span>
-          </div>
-        {/if}
-        {#if editItem.source.duration}
-          <div class="info-row">
-            <span class="info-label">Duration</span>
-            <span>{editItem.source.duration}s</span>
-          </div>
-        {/if}
-        {#if editItem.source.webpage_url ?? editItem.source.url}
-          <div class="info-row">
-            <span class="info-label">Source</span>
-            <a
-              href={editItem.source.webpage_url ?? editItem.source.url}
-              target="_blank"
-              rel="noreferrer"
-              class="mono source-link"
-            >{editItem.source.webpage_url ?? editItem.source.url}</a>
-          </div>
-        {/if}
-        {#if editItem.source.description}
-          <div class="info-row">
-            <span class="info-label">Description</span>
-            <span class="description">{editItem.source.description}</span>
-          </div>
-        {/if}
-      {/if}
-    </div>
-
-    <hr class="divider" />
-
-    <!-- editable fields -->
-    <label class="field-label" for="edit-title">Title</label>
-    <input
-      id="edit-title"
-      class="input"
-      placeholder={editItem.filename}
-      bind:value={editTitle}
+<!-- details modal: the same editor body as the case sidebar (provenance,
+     derivation chain, title/notes/folder) so both stay in step -->
+{#if infoEntityId}
+  <Modal title="Details" onclose={() => (infoEntityId = null)} width="520px">
+    <EntityDetails
+      entityId={infoEntityId}
+      onclose={() => (infoEntityId = null)}
+      ondeleted={() => (infoEntityId = null)}
     />
-
-    <label class="field-label" for="edit-notes" style="margin-top: 12px;">Notes</label>
-    <textarea
-      id="edit-notes"
-      class="textarea"
-      rows="4"
-      placeholder="Add context, observations, links…"
-      bind:value={editNotes}
-    ></textarea>
-
-    <div class="modal-actions">
-      {#if editItem.kind === 'image'}
-        <button class="btn btn-ghost btn-sm" onclick={() => { sendToComposer(editItem); editItem = null; }}>
-          <Icon name="proof" size={14} /> Send to Composer
-        </button>
-      {/if}
-      <div style="flex:1"></div>
-      <button class="btn" onclick={() => (editItem = null)}>Cancel</button>
-      <button class="btn btn-primary" onclick={saveInfo} disabled={editSaving}>
-        {editSaving ? 'Saving…' : 'Save'}
-      </button>
-    </div>
   </Modal>
 {/if}
 
@@ -1015,80 +879,7 @@
     background: var(--accent-soft);
   }
 
-  /* info modal */
-  .modal-preview {
-    border-radius: var(--r);
-    overflow: hidden;
-    background: var(--bg-2);
-    margin-bottom: 14px;
-    max-height: 260px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .modal-preview img,
-  .modal-preview video {
-    max-width: 100%;
-    max-height: 260px;
-    object-fit: contain;
-    display: block;
-  }
-  .info-rows {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin-bottom: 4px;
-  }
-  .info-row {
-    display: flex;
-    gap: 10px;
-    font-size: var(--fs-sm);
-    align-items: baseline;
-    min-width: 0;
-  }
-  .info-label {
-    color: var(--text-3);
-    font-size: var(--fs-xs);
-    min-width: 70px;
-    flex-shrink: 0;
-  }
-  .hash {
-    font-size: 11px;
-    word-break: break-all;
-    color: var(--text-2);
-  }
-  .source-link {
-    font-size: var(--fs-xs);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .description {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 8.5em;
-    overflow-y: auto;
-  }
-  .divider {
-    border: none;
-    border-top: 1px solid var(--border);
-    margin: 14px 0 12px;
-  }
-  .field-label {
-    display: block;
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    margin-bottom: 5px;
-  }
-  .textarea {
-    width: 100%;
-    resize: vertical;
-    min-height: 80px;
-  }
+  /* shared across picker + details modals */
   .modal-actions {
     display: flex;
     align-items: center;

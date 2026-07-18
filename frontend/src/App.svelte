@@ -9,6 +9,7 @@
   import CaseSidebar from './components/CaseSidebar.svelte';
   import Toasts from './components/Toasts.svelte';
   import MediaLibrary from './tools/MediaLibrary.svelte';
+  import Files from './tools/Files.svelte';
   import Satellite from './tools/Satellite.svelte';
   import ProofComposer from './tools/ProofComposer.svelte';
   import PostComposer from './tools/PostComposer.svelte';
@@ -20,6 +21,7 @@
   // of the working flow.
   const TOOLS = [
     { id: 'media', label: 'Media', component: MediaLibrary },
+    { id: 'files', label: 'Files', component: Files },
     { id: 'inspect', label: 'Inspect', component: Inspector },
     { id: 'satellite', label: 'Satellite', component: Satellite },
     { id: 'proof', label: 'Proof', component: ProofComposer },
@@ -68,6 +70,10 @@
   startEvents();
   onEvent('capture', (ev) => {
     toast(`Capture filed from ${ev.site}: ${ev.title}`, 'ok', 5000);
+    if (caseState.current?.id === ev.case_id) reloadCase();
+  });
+  onEvent('bookmark', (ev) => {
+    toast(`Bookmark saved: ${ev.title}`, 'ok', 5000);
     if (caseState.current?.id === ev.case_id) reloadCase();
   });
 </script>

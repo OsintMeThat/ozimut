@@ -13,12 +13,23 @@
 
   <!-- one of these three states shows at a time -->
   <section id="state-nomap" hidden>
-    <p>This doesn't look like a map site.</p>
+    <p>Not a map site — no screenshot here.</p>
     <p class="muted">
-      Azimut Capture only works on the map sites Azimut recognizes (Google
-      Maps/Earth, Bing, Yandex, OSM, Apple Maps, Zoom Earth, Copernicus, …) —
-      one screenshot per click, coordinates read from the page URL by the app.
+      Screen capture is maps only (Google Maps/Earth, Bing, Yandex, OSM, Apple
+      Maps, Zoom Earth, Copernicus). You can still file this page as a bookmark:
+      a saved link, nothing downloaded.
     </p>
+    <div class="row">
+      <label>Case</label>
+      <select id="bm-case"></select>
+    </div>
+    <div class="row">
+      <label>Title</label>
+      <input id="bm-title" type="text" placeholder="optional" />
+    </div>
+    <div class="actions">
+      <button id="save-bookmark" class="primary">Save this page as a bookmark</button>
+    </div>
   </section>
 
   <section id="state-azimut" hidden>

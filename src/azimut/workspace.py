@@ -23,11 +23,32 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from . import config
 
 CASE_SUBDIRS = ("media", "proofs", "exports", "inspect")
+
+# On-disk schema for case.json. A newer Azimut opens an older case by running
+# the migrations below up to this number on first open; a case written by a
+# *newer* Azimut (higher schema) is refused rather than mangled (spec §7,
+# forward compatibility). Bump this in the same change that adds a migration.
+CASE_SCHEMA = 1
+
+# from_version -> function(data) returning data reshaped for from_version + 1.
+# The runner (Case.migrate) owns stamping the new schema number, so a migration
+# only rewrites fields. Empty while we're on the first schema; each future
+# breaking change to case.json lands one entry here plus a fixture pinning it.
+CASE_MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+
+def _case_schema(data: dict[str, Any]) -> int:
+    """The schema a loaded case.json declares. Legacy/untagged files predate the
+    tag and are treated as the first schema."""
+    meta = data.get("azimut")
+    if isinstance(meta, dict) and isinstance(meta.get("schema"), int):
+        return meta["schema"]
+    return 1
 
 # Empty scratch sessions older than this are reaped at startup (spec §9).
 SCRATCH_MAX_AGE_DAYS = 14
@@ -64,6 +85,7 @@ EntityStatus = Literal["confirmed", "suggested"]
 ENTITY_TYPES = (
     "person", "organization", "alias", "account", "email", "phone", "domain",
     "ip", "vehicle", "place", "capture", "event", "media", "proof", "note",
+    "bookmark",
 )
 
 
@@ -175,8 +197,47 @@ class Case:
         for parent in (config.cases_dir(), config.scratch_dir()):
             path = parent / case_id
             if (path / "case.json").exists():
-                return cls(path)
+                case = cls(path)
+                case.migrate()
+                return case
         raise CaseError(f"case '{case_id}' not found")
+
+    def migrate(self) -> dict[str, Any]:
+        """Bring case.json up to ``CASE_SCHEMA`` on open, and return the data.
+
+        A case written by the same schema is returned untouched (the common
+        path, so today this never rewrites anything). An older one is upgraded
+        in order, backing the file up once before the first rewrite so a bad
+        migration is recoverable. A *newer* one is refused: an old Azimut must
+        not silently drop fields it was never taught, so the user is told to
+        update instead (spec §7).
+        """
+        with self._lock:
+            data = self.read()
+            version = _case_schema(data)
+            if version == CASE_SCHEMA:
+                return data
+            if version > CASE_SCHEMA:
+                raise CaseError(
+                    f"case '{self.id}' was made with a newer Azimut "
+                    f"(schema {version} > {CASE_SCHEMA}); update Azimut to open it"
+                )
+            self._backup(f"pre-migrate-v{version}")
+            for step in range(version, CASE_SCHEMA):
+                migrate = CASE_MIGRATIONS.get(step)
+                if migrate is None:
+                    raise CaseError(f"no migration for case schema {step}")
+                data = migrate(data)
+                data.setdefault("azimut", {})["schema"] = step + 1
+            self._write_json(data)
+            return data
+
+    def _backup(self, tag: str) -> None:
+        """Copy case.json aside once, under a ``tag``. Never overwrites an
+        existing backup — a re-run of the same migration keeps the first copy."""
+        dst = self.json_path.with_name(f"case.{tag}.json")
+        if not dst.exists():
+            shutil.copy2(self.json_path, dst)
 
     @classmethod
     def cleanup_scratch(cls, max_age_days: int = SCRATCH_MAX_AGE_DAYS) -> int:

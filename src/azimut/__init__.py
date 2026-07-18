@@ -2,7 +2,7 @@
 
 from PIL import Image as _Image
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # Cap the pixels Pillow will decode from a file, process-wide. A tiny,
 # highly-compressed image can otherwise expand to gigabytes in memory and take
