@@ -177,12 +177,11 @@ def save_frames(case_id: str, body: SaveFramesIn) -> dict[str, Any]:
 def compose(case_id: str, body: ComposeIn) -> dict[str, Any]:
     """Composite a perspective-warped collage from tray/case images (Save gate)."""
     case = get_case(case_id)
-    nodes = [
-        {"src": {**n.src.model_dump(exclude={"ops"}),
-                 "ops": [op.model_dump() for op in n.src.ops]},
-         "quad": [list(pt) for pt in n.quad]}
-        for n in body.nodes
-    ]
+    nodes: list[dict[str, Any]] = []
+    for n in body.nodes:
+        src = n.src.model_dump(exclude={"ops"})
+        src["ops"] = [op.model_dump() for op in n.src.ops]
+        nodes.append({"src": src, "quad": [list(pt) for pt in n.quad]})
     try:
         return inspect_engine.compose_perspective(
             case, width=body.width, height=body.height, nodes=nodes,
@@ -221,12 +220,11 @@ def auto_stitch(case_id: str, body: StitchIn) -> dict[str, Any]:
 def compose_preview(case_id: str, body: ComposeIn) -> Response:
     """Render the composited collage to a PNG for the Save tab — nothing is filed."""
     case = get_case(case_id)
-    nodes = [
-        {"src": {**n.src.model_dump(exclude={"ops"}),
-                 "ops": [op.model_dump() for op in n.src.ops]},
-         "quad": [list(pt) for pt in n.quad]}
-        for n in body.nodes
-    ]
+    nodes: list[dict[str, Any]] = []
+    for n in body.nodes:
+        src = n.src.model_dump(exclude={"ops"})
+        src["ops"] = [op.model_dump() for op in n.src.ops]
+        nodes.append({"src": src, "quad": [list(pt) for pt in n.quad]})
     try:
         png = inspect_engine.compose_preview_png(
             case, width=body.width, height=body.height, nodes=nodes, background=body.background,

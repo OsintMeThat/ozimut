@@ -129,8 +129,6 @@ def test_entities_and_links(client):
 # Uses a pre-written sidecar to avoid a live tile fetch.
 # ---------------------------------------------------------------------------
 
-import json
-import os
 
 
 def _plant_capture(client, cid: str) -> dict:

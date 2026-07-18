@@ -45,7 +45,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "pytest-asyncio>=0.23,<2", "httpx>=0.27,<1.0"]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=0.23,<2",
+    "httpx>=0.27,<1.0",
+    # Static analysis, run in CI (see .github/workflows/ci.yml). ruff is 0.x and
+    # ships rule changes between minors, so it's pinned to one minor; mypy to the
+    # next major. Both bounds are raised deliberately, after the suite is green.
+    "ruff>=0.15,<0.16",
+    "mypy>=2.3,<3",
+]
 
 [project.scripts]
 azimut = "azimut.cli:main"
@@ -82,3 +91,17 @@ packages = ["src/azimut"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.ruff]
+# Match the codebase's existing wrap. Default rule set (E/F/W) only — this is a
+# bug-and-hygiene gate, not a formatter, so nothing here reflows working code.
+line-length = 100
+target-version = "py311"
+
+[tool.mypy]
+files = ["src/azimut"]
+# yt-dlp, gallery-dl and cv2 ship no type stubs; don't fail on their absence.
+# No python_version pin: mypy runs under the CI interpreter (3.12+), and numpy's
+# 2.x stubs use 3.12 syntax that a 3.11 target can't parse. The 3.11 floor stays
+# guaranteed by the pytest matrix, not the type-checker.
+ignore_missing_imports = true

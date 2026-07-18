@@ -387,7 +387,7 @@ class Case:
     ) -> dict[str, Any]:
         with self._lock:
             data = self.read()
-            entity = {
+            entity: dict[str, Any] = {
                 "id": _new_id("e"),
                 "type": type_,
                 "label": label,
@@ -424,7 +424,7 @@ class Case:
             if len(data["entities"]) == before:
                 raise CaseError(f"entity '{entity_id}' not found")
             data["links"] = [
-                l for l in data["links"] if entity_id not in (l["from"], l["to"])
+                lk for lk in data["links"] if entity_id not in (lk["from"], lk["to"])
             ]
             self._write_json(data)
 
@@ -497,15 +497,15 @@ class Case:
                 i for i in dict.fromkeys(to_ids) if i in ids and i != from_id
             ]
             mine = {
-                l["to"]: l
-                for l in data["links"]
-                if l["from"] == from_id and l["type"] == type_
+                lk["to"]: lk
+                for lk in data["links"]
+                if lk["from"] == from_id and lk["type"] == type_
             }
             keep = {mine[to_id]["id"] for to_id in wanted if to_id in mine}
             data["links"] = [
-                l
-                for l in data["links"]
-                if l["from"] != from_id or l["type"] != type_ or l["id"] in keep
+                lk
+                for lk in data["links"]
+                if lk["from"] != from_id or lk["type"] != type_ or lk["id"] in keep
             ]
             for to_id in wanted:
                 if to_id not in mine:
@@ -519,13 +519,13 @@ class Case:
                         }
                     )
             self._write_json(data)
-            return [l for l in data["links"] if l["from"] == from_id and l["type"] == type_]
+            return [lk for lk in data["links"] if lk["from"] == from_id and lk["type"] == type_]
 
     def remove_link(self, link_id: str) -> None:
         with self._lock:
             data = self.read()
             before = len(data["links"])
-            data["links"] = [l for l in data["links"] if l["id"] != link_id]
+            data["links"] = [lk for lk in data["links"] if lk["id"] != link_id]
             if len(data["links"]) == before:
                 raise CaseError(f"link '{link_id}' not found")
             self._write_json(data)

@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "module": "esnext",
+    "checkJs": false,
+    "allowJs": true
+  },
+  "include": ["src/**/*.js", "src/**/*.svelte"]
+}

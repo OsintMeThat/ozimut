@@ -220,6 +220,7 @@ def _serve_tile(
             continue
         break
 
+    assert upstream is not None  # the loop always assigns it before breaking
     if upstream.status_code == 404:
         return None
     if upstream.status_code >= 400:
@@ -572,9 +573,13 @@ def update_capture(case_id: str, body: SatelliteUpdateIn) -> dict[str, Any]:
     # empty title falls back to the coordinates (mirrored onto the entity label)
     if body.title is not None:
         source = item.get("source") or {}
-        patch["title"] = body.title.strip() or satellite_engine.coords_label(
-            source.get("lat"), source.get("lon")
+        lat, lon = source.get("lat"), source.get("lon")
+        label = (
+            satellite_engine.coords_label(lat, lon)
+            if lat is not None and lon is not None
+            else ""
         )
+        patch["title"] = body.title.strip() or label
     try:
         updated = media_engine.update_media(case, body.path, patch)
     except (ValueError, CaseError) as exc:

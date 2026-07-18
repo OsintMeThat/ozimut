@@ -113,12 +113,12 @@ def _features(cv2, det, img: Image.Image):
         scale = WORK_DIM / max(gray.size)
         gray = gray.resize(
             (max(1, round(gray.width * scale)), max(1, round(gray.height * scale))),
-            Image.BILINEAR,
+            Image.Resampling.BILINEAR,
         )
     kp, desc = det.detectAndCompute(np.asarray(gray), None)
     if desc is None or len(kp) < 4:
         return None, None
-    return np.float32([k.pt for k in kp]) / scale, desc
+    return np.asarray([k.pt for k in kp], dtype=np.float32) / scale, desc
 
 
 def _pair_homography(cv2, matcher, feat_a, feat_b) -> tuple[Any, int]:
@@ -136,8 +136,8 @@ def _pair_homography(cv2, matcher, feat_a, feat_b) -> tuple[Any, int]:
     good = [m for pair in knn if len(pair) == 2 for m, n in [pair] if m.distance < _RATIO * n.distance]
     if len(good) < MIN_INLIERS:
         return None, 0
-    src = np.float32([pts_b[m.queryIdx] for m in good]).reshape(-1, 1, 2)
-    dst = np.float32([pts_a[m.trainIdx] for m in good]).reshape(-1, 1, 2)
+    src = np.asarray([pts_b[m.queryIdx] for m in good], dtype=np.float32).reshape(-1, 1, 2)
+    dst = np.asarray([pts_a[m.trainIdx] for m in good], dtype=np.float32).reshape(-1, 1, 2)
     H, mask = cv2.findHomography(src, dst, cv2.RANSAC, _RANSAC_PX)
     if H is None or mask is None:
         return None, 0
@@ -212,7 +212,7 @@ def _project_corners(cv2, H, size: tuple[int, int]) -> Quad:
     import numpy as np
 
     w, h = size
-    corners = np.float32([[0, 0], [w, 0], [w, h], [0, h]]).reshape(-1, 1, 2)
+    corners = np.asarray([[0, 0], [w, 0], [w, h], [0, h]], dtype=np.float32).reshape(-1, 1, 2)
     out = cv2.perspectiveTransform(corners, H.astype(np.float64))
     return [[float(x), float(y)] for x, y in out.reshape(-1, 2)]
 
@@ -342,7 +342,7 @@ def _work_array(img: Image.Image):
         scale = WORK_DIM / max(rgb.size)
         rgb = rgb.resize(
             (max(1, round(rgb.width * scale)), max(1, round(rgb.height * scale))),
-            Image.BILINEAR,
+            Image.Resampling.BILINEAR,
         )
     return np.asarray(rgb)
 
