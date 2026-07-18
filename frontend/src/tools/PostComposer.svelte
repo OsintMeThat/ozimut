@@ -1,7 +1,7 @@
 <script>
   import { api } from '../lib/api.js';
   import { caseState, uiState, toast, reloadCase, prefs } from '../lib/state.svelte.js';
-  import { proofCoordsText, proofSource } from '../lib/composer.js';
+  import { proofCoordsText, proofSource, DEFAULT_PROOF_TITLE } from '../lib/composer.js';
   import { bidiSafe } from '../lib/bidi.js';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
@@ -79,7 +79,7 @@
     const p = uiState.postProof;
     if (!p) return;
     uiState.postProof = null;
-    description = p.title === 'Untitled proof' ? '' : (p.title ?? '');
+    description = p.title === DEFAULT_PROOF_TITLE ? '' : (p.title ?? '');
     source = p.source ?? p.sources?.[0] ?? '';
     setProof(p.png ?? null);
     tweet1Edited = false;
@@ -268,7 +268,7 @@
   async function pickProof(item) {
     setProof(item.png);
     proofPickerOpen = false;
-    if (!description.trim() && item.title && item.title !== 'Untitled proof') {
+    if (!description.trim() && item.title && item.title !== DEFAULT_PROOF_TITLE) {
       description = item.title;
     }
     // Pull the proof's coordinates + source into the post so the fields fill in.

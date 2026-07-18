@@ -16,6 +16,7 @@
     toSpec, newId, loadImage, orderedFeatureColors, notesFromShapes,
     copyShapeSpec, dedupeBySrc, isSatelliteCapture, satPanelInput, mediaPanelInput,
     SIG_ANCHORS, newSignature, signatureBox, signatureOffset,
+    DEFAULT_PROOF_TITLE, proofSlug, uniqueProofTitle,
   } from '../lib/composer.js';
   import { createHistory } from '../lib/history.js';
 
@@ -37,7 +38,7 @@
   // `notes` holds the legend text per color (annotations are written by color,
   // not per element); `shapes` are the drawn geometry bound to a panel.
   const proof = $state({
-    title: 'Untitled proof', panels: [], shapes: [], notes: {}, legendOrder: [],
+    title: DEFAULT_PROOF_TITLE, panels: [], shapes: [], notes: {}, legendOrder: [],
     coordsText: '', source: '', // '' → auto-derived from panels; non-empty → manual override
     captionSize: CAPTION_SIZE, legendSize: LEGEND_SIZE, footerSize: FOOTER_SIZE, footer: '',
     layout: 'grid', // 'grid' (rows) | 'free' (drag panels anywhere, overlap allowed)
@@ -59,6 +60,10 @@
   let advancedOpen = $state(false);
   let collapsed = $state({ panels: false, annotations: false, elements: false });
   let savedName = $state(null);
+  // Whether the analyst edited the title on this document (vs the auto-assigned
+  // default). An untouched default renumbers on a name clash; a title they typed
+  // asks before overwriting an existing proof. Reset on open/discard.
+  let titleTouched = $state(false);
   let dirty = $state(false);
 
   // Kept in step with deletes made anywhere else in the app. If the saved proof
@@ -134,7 +139,7 @@
     const spec = JSON.parse(json);
     histBusy = true;
     if (pathDraft) finishPath(false);
-    proof.title = spec.title ?? 'Untitled proof';
+    proof.title = spec.title ?? DEFAULT_PROOF_TITLE;
     proof.coordsText = spec.coordsText ?? '';
     proof.source = spec.source ?? '';
     proof.captionSize = spec.captionSize ?? CAPTION_SIZE;
@@ -291,7 +296,7 @@
     docSize(proof.panels, proof.shapes, proof.notes, textOpts(), proof.legendOrder, proof.layout);
 
   function resetDoc() {
-    proof.title = 'Untitled proof';
+    proof.title = freshTitle();
     proof.panels = [];
     proof.shapes = [];
     proof.notes = {};
@@ -305,6 +310,7 @@
     proof.layout = 'grid';
     proof.signature = null;
     savedName = null;
+    titleTouched = false;
     selectedId = null;
     selectedPanelId = null;
     dirty = false;
@@ -1492,14 +1498,57 @@
     }
   }
 
+  // Every proof already saved in this case, read off the filed entities: the
+  // slugs (filename without `proofs/…​.json`) to catch a filename collision, and
+  // the titles so a fresh proof can take a title that reads apart from them.
+  function savedProofEntities() {
+    return (caseState.current?.entities ?? []).filter((e) => {
+      const s = e.attrs?.spec;
+      return typeof s === 'string' && s.startsWith('proofs/') && s.endsWith('.json');
+    });
+  }
+  const savedProofNames = () =>
+    new Set(savedProofEntities().map((e) => e.attrs.spec.slice(7, -5)));
+  const savedProofTitles = () => new Set(savedProofEntities().map((e) => e.label ?? ''));
+
+  // Title of a saved proof by its slug, for the overwrite prompt.
+  function savedProofTitle(name) {
+    const e = savedProofEntities().find((x) => x.attrs.spec === `proofs/${name}.json`);
+    return e?.label ?? name;
+  }
+
+  // Default title for a fresh proof, numbered past any already in the case so
+  // the top-of-screen name reads apart ("Untitled proof 2"). Called on reset.
+  const freshTitle = () => uniqueProofTitle(DEFAULT_PROOF_TITLE, savedProofTitles());
+
+  let overwritePrompt = $state(null); // { name, andPost } when a first save hits a named proof
+
   async function save({ andPost = false } = {}) {
+    if (!proof.panels.length || saving) return;
+    // A proof already bound to a saved name (opened, or saved once) writes back
+    // over itself — no collision to resolve. On a first save the title is the
+    // name: an untouched default title keeps itself unique/numbered (no prompt),
+    // a title the analyst typed that lands on an existing proof asks before it
+    // overwrites the one already under that name.
+    if (!savedName) {
+      if (!titleTouched) {
+        proof.title = freshTitle();
+      } else if (savedProofNames().has(proofSlug(proof.title))) {
+        overwritePrompt = { name: proofSlug(proof.title), andPost };
+        return;
+      }
+    }
+    return performSave(savedName, andPost);
+  }
+
+  async function performSave(name, andPost = false) {
     if (!proof.panels.length || saving) return;
     saving = true;
     try {
       const c = await ensureCase();
       const dataUrl = exportPng();
       const result = await api.post(`/api/cases/${c.id}/proofs`, {
-        name: savedName,
+        name,
         title: proof.title,
         spec: toSpec(proof),
         png_base64: dataUrl.split(',')[1],
@@ -1545,6 +1594,10 @@
   async function openProof(entry) {
     const spec = await api.get(`/api/cases/${caseState.current.id}/proofs/${entry.name}`);
     resetDoc();
+    // Bind the opened proof's name up front, before the panel images load: they
+    // stream in one by one and enable the Save button as they arrive, so a Save
+    // during the load has to write back over this proof, not file a new one.
+    savedName = entry.name;
     proof.title = spec.title;
     proof.coordsText = spec.coordsText ?? '';
     proof.source = spec.source ?? '';
@@ -1568,7 +1621,6 @@
     // legend text lives in `notes` (per color); migrate old per-shape comments
     proof.notes = spec.notes ?? notesFromShapes(proof.shapes);
     proof.legendOrder = spec.legendOrder ?? [];
-    savedName = entry.name;
     openList = null;
     dirty = false;
     anchorHistory();
@@ -1605,7 +1657,11 @@
 <div class="tool">
   <div class="tool-header">
     <h2>Proof Composer</h2>
-    <input class="input title-input" bind:value={proof.title} onchange={() => (dirty = true)} />
+    <input
+      class="input title-input"
+      bind:value={proof.title}
+      oninput={() => { dirty = true; titleTouched = true; }}
+    />
     {#if dirty}<span class="badge">unsaved</span>{/if}
     <div class="spacer"></div>
     {#if caseState.current}
@@ -2095,6 +2151,23 @@
     icon="reset"
     onconfirm={discardProof}
     oncancel={() => (discardConfirm = false)}
+  />
+{/if}
+
+{#if overwritePrompt}
+  <ConfirmDialog
+    title="Overwrite this proof?"
+    message={`“${savedProofTitle(overwritePrompt.name)}” is already saved in this case.`}
+    detail="Saving replaces its PNG and editable spec. Rename this proof to keep both."
+    confirmLabel="Overwrite"
+    tone="danger"
+    icon="check"
+    onconfirm={() => {
+      const p = overwritePrompt;
+      overwritePrompt = null;
+      performSave(p.name, p.andPost);
+    }}
+    oncancel={() => (overwritePrompt = null)}
   />
 {/if}
 

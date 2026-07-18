@@ -39,6 +39,33 @@ export function newId(prefix) {
   return `${prefix}${Date.now().toString(36)}${(idSeq++).toString(36)}`;
 }
 
+// Title a fresh proof carries until the analyst renames it. Two proofs left at
+// this title auto-number on save (see uniqueProofName) instead of clobbering.
+export const DEFAULT_PROOF_TITLE = 'Untitled proof';
+
+/** URL-safe proof filename from free text — mirror of the backend `_slug`. */
+export function proofSlug(text) {
+  const slug = (text ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug.slice(0, 80) || 'proof';
+}
+
+/**
+ * A proof title that doesn't collide with `taken` (existing proof titles):
+ * `base` when free, else `base 2`, `base 3`, … A new proof left at the default
+ * title gets numbered so two never-renamed proofs read apart in the case, and
+ * the filename simply follows the title (proofSlug). `taken` is a Set or array.
+ */
+export function uniqueProofTitle(base, taken) {
+  const set = taken instanceof Set ? taken : new Set(taken);
+  if (!set.has(base)) return base;
+  let n = 2;
+  while (set.has(`${base} ${n}`)) n += 1;
+  return `${base} ${n}`;
+}
+
 export const CAPTION_SIZE = 20; // default caption font size (px, editable per proof)
 export const LEGEND_SIZE = 20; // default legend text size
 export const FOOTER_SIZE = 15; // default footer / attribution text size

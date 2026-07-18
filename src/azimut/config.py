@@ -23,7 +23,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+# On-disk schema for settings.json — the app-wide sibling of case.json's
+# CASE_SCHEMA (workspace.py). An older file is migrated up to this on load; a
+# newer file is left alone, since update() below preserves keys this Azimut
+# doesn't know. Bump it in the same change that adds a SETTINGS_MIGRATIONS entry.
+SETTINGS_SCHEMA = 1
+
 DEFAULT_SETTINGS: dict[str, Any] = {
+    # Schema version this build writes. Read back through _settings_schema() so
+    # a future breaking rename is migrated rather than silently dropped.
+    "schema": SETTINGS_SCHEMA,
     # Extra XYZ tile providers added by the user (spec §6 v1 notes).
     # Each: {"id", "label", "url" ({x}/{y}/{z} template), "attribution", "max_zoom"}
     "tile_providers": [],
@@ -165,6 +174,16 @@ def ensure_workspace() -> None:
     _restrict(workspace_root(), 0o700)
     if not settings_path().exists():
         save_settings(DEFAULT_SETTINGS)
+        return
+    # Upgrade an older settings.json in place, once, so the file on disk matches
+    # the shape the rest of the app expects. load_settings() also migrates in
+    # memory, so a read is safe even before this runs.
+    try:
+        raw = json.loads(settings_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    if _settings_schema(raw) < SETTINGS_SCHEMA:
+        save_settings(migrate_settings(raw))
 
 
 def _restrict(path: Path, mode: int) -> None:
@@ -175,6 +194,33 @@ def _restrict(path: Path, mode: int) -> None:
         pass
 
 
+# from_version -> function(data) returning settings reshaped for from_version+1.
+# The runner (migrate_settings) stamps the new number, so a migration only
+# rewrites fields. Empty while we're on the first schema.
+SETTINGS_MIGRATIONS: dict[int, Callable[[dict[str, Any]], dict[str, Any]]] = {}
+
+
+def _settings_schema(data: dict[str, Any]) -> int:
+    """The schema a loaded settings.json declares. Files predating the tag are
+    the first schema."""
+    value = data.get("schema")
+    return value if isinstance(value, int) else 1
+
+
+def migrate_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade a raw settings dict to ``SETTINGS_SCHEMA`` in memory.
+
+    A newer file is returned untouched — update() in load_settings keeps keys
+    this build doesn't recognise, so there is nothing to lose by loading it.
+    Pure: it never writes. ensure_workspace() persists the result once at start.
+    """
+    version = _settings_schema(data)
+    for step in range(version, SETTINGS_SCHEMA):
+        data = SETTINGS_MIGRATIONS[step](data)
+        data["schema"] = step + 1
+    return data
+
+
 def load_settings() -> dict[str, Any]:
     # deep copies: callers mutate nested dicts (usage counters, prefs), and a
     # shallow copy would let that leak into DEFAULT_SETTINGS itself
@@ -183,7 +229,7 @@ def load_settings() -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return copy.deepcopy(DEFAULT_SETTINGS)
     merged = copy.deepcopy(DEFAULT_SETTINGS)
-    merged.update(data)
+    merged.update(migrate_settings(data))
     return merged
 
 

@@ -1,15 +1,20 @@
 import { describe, it, expect } from 'vitest';
 import { WORKSPACES, workspaceOf, toolFromHash } from './workspaces.js';
 
-const ALL_TOOLS = ['media', 'inspect', 'satellite', 'proof', 'post', 'settings'];
+const ALL_TOOLS = ['media', 'files', 'inspect', 'satellite', 'proof', 'post', 'settings'];
 
 describe('workspaceOf', () => {
   it('maps every rail tool to exactly one workspace', () => {
-    for (const tool of ['media', 'inspect', 'satellite', 'proof', 'post']) {
+    for (const tool of ['media', 'files', 'inspect', 'satellite', 'proof', 'post']) {
       const owners = WORKSPACES.filter((w) => w.tools.includes(tool));
       expect(owners).toHaveLength(1);
       expect(workspaceOf(tool)).toBe(owners[0]);
     }
+  });
+
+  it('groups media and files under collect', () => {
+    expect(workspaceOf('media').id).toBe('collect');
+    expect(workspaceOf('files').id).toBe('collect');
   });
 
   it('groups proof and post under compose', () => {
@@ -38,6 +43,7 @@ describe('toolFromHash', () => {
   it('accepts workspace/tab form', () => {
     expect(toolFromHash('#compose/post', ALL_TOOLS)).toBe('post');
     expect(toolFromHash('#compose/proof', ALL_TOOLS)).toBe('proof');
+    expect(toolFromHash('#collect/files', ALL_TOOLS)).toBe('files');
   });
 
   it('falls back to the first tool on an unknown tab', () => {

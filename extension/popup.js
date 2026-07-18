@@ -114,7 +114,32 @@ async function init() {
   }
 
   if (!parsed.site) {
+    // Not a map: capture is out, but the page can still be filed as a bookmark
+    // (a saved link, nothing downloaded). Same token, its own ingest route.
     $("state-nomap").hidden = false;
+    if (tab.title) $("bm-title").value = tab.title;
+    const paired = await loadCases($("bm-case"), stored);
+    $("save-bookmark").addEventListener("click", async () => {
+      if (!paired) return;
+      $("save-bookmark").disabled = true;
+      const body = new FormData();
+      body.append("url", tab.url);
+      body.append("case_id", $("bm-case").value);
+      body.append("title", $("bm-title").value.trim());
+      try {
+        const r = await fetch(`${stored.backendUrl}/api/ingest/bookmark`, {
+          method: "POST",
+          headers: { "X-Azimut-Token": stored.token },
+          body,
+        });
+        if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+        status("Bookmark saved.", "ok");
+        setTimeout(() => window.close(), 700);
+      } catch (e) {
+        $("save-bookmark").disabled = false;
+        status(`Could not save: ${e.message}`, "error");
+      }
+    });
     return;
   }
 

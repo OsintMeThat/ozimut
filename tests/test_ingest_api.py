@@ -208,6 +208,58 @@ def test_cors_opens_exactly_extension_origins_on_exactly_ingest_routes(client):
     assert "access-control-allow-origin" not in r.headers
 
 
+def _bookmark(client, token=None, **overrides):
+    data = {"url": "https://example.com/leak", "title": "A page"}
+    data.update(overrides)
+    data = {k: v for k, v in data.items() if v is not None}
+    headers = {"X-Azimut-Token": token} if token else {}
+    return client.post("/api/ingest/bookmark", data=data, headers=headers)
+
+
+def test_bookmark_needs_the_token(client):
+    _token(client)  # minted, but the request carries none
+    assert _bookmark(client).status_code == 401
+    assert _bookmark(client, token="wrong").status_code == 401
+
+
+def test_bookmark_files_a_link_entity_without_a_screenshot(client):
+    token = _token(client)
+    cid = client.post("/api/cases", json={"name": "Links"}).json()["id"]
+    r = _bookmark(client, token=token, case_id=cid, title="Leak site")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["case_id"] == cid and body["title"] == "Leak site"
+    ents = client.get(f"/api/cases/{cid}").json()["entities"]
+    bm = [e for e in ents if e["type"] == "bookmark"]
+    assert len(bm) == 1
+    assert bm[0]["label"] == "Leak site"
+    assert bm[0]["attrs"]["url"] == "https://example.com/leak"
+    assert bm[0]["attrs"]["site"] == "example.com"
+    # no image entity was created — a bookmark is a pointer, not a copy
+    assert client.get(f"/api/cases/{cid}/media").json() == []
+
+
+def test_bookmark_falls_back_to_the_host_when_untitled(client):
+    token = _token(client)
+    cid = client.post("/api/cases", json={"name": "Untitled"}).json()["id"]
+    body = _bookmark(client, token=token, case_id=cid, title="").json()
+    assert body["title"] == "example.com"
+
+
+def test_bookmark_refuses_non_http_urls(client):
+    token = _token(client)
+    for bad in ("javascript:alert(1)", "file:///etc/passwd", "not a url"):
+        assert _bookmark(client, token=token, url=bad).status_code == 422
+
+
+def test_bookmark_empty_case_files_into_a_scratch_session(client):
+    token = _token(client)
+    body = _bookmark(client, token=token).json()
+    cases = client.get("/api/cases").json()
+    match = [c for c in cases if c["id"] == body["case_id"]]
+    assert match and match[0]["scratch"] is True
+
+
 def test_extension_zip_serves_the_packaged_runtime_files(client):
     import zipfile as zf
 

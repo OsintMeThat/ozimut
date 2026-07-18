@@ -16,7 +16,7 @@
     FREE_TIER,
   } from '../lib/usage.js';
   import { probeKey, googleMapsLoadedKey } from '../lib/gmaps.js';
-  import { extensionVersion } from '../lib/extBridge.js';
+  import { extensionVersion, extensionOutdated } from '../lib/extBridge.js';
   import Icon from '../components/Icon.svelte';
 
   // Imagery and Usage were the same four objects seen from two rooms: the key
@@ -51,6 +51,11 @@
       placeholder: 'pk.…',
       help: 'https://account.mapbox.com/access-tokens/',
       usage: USAGE_LINKS.mapbox,
+      steps: [
+        'Sign in (or create a free account) at mapbox.com.',
+        'Open Account → Tokens and copy the default public token, or create a new one.',
+        'No referrer restriction needed: Azimut calls Mapbox from its own backend, not the browser.',
+      ],
       overage:
         'Past the tier, Mapbox bills extra tiles automatically; set a spending alert in your account.',
     },
@@ -65,6 +70,11 @@
       usage: USAGE_LINKS.google,
       warning:
         'EEA billing accounts: since 8 July 2025 Google no longer serves satellite tiles to Europe (403). Use a Maps JavaScript API key instead.',
+      steps: [
+        'In the Google Cloud Console, enable the "Map Tiles API" on your project.',
+        'Create an API key (Credentials) and restrict it to that API.',
+        'Use an IP restriction, not a referrer one: Azimut calls Google from its own backend, not the browser.',
+      ],
       overage:
         'Extra tiles are billed to your Cloud project; a quota cap in the Cloud Console makes it stop serving instead.',
     },
@@ -151,7 +161,7 @@
   // helpers read; `tierEdits` is what's in the boxes.
   let tiers = $state(null);
   let tierEdits = $state(perProvider(() => ''));
-  let about = $state({ version: '', workspace_root: '' });
+  let about = $state({ version: '', workspace_root: '', extension_version: '' });
 
   // --- capture extension: pairing token + detection (lib/extBridge.js) ---
   let ingestToken = $state('');
@@ -159,6 +169,11 @@
   // read once per mount: the marker is stamped before the app loads, so a
   // mid-session install genuinely needs a tab reload (the text says so)
   const extDetected = extensionVersion();
+
+  // Is the bundled extension newer than the one loaded in this browser? The app
+  // can't reload an unpacked extension for the user (the browser won't let it),
+  // so it flags the mismatch and points at the same re-download + reload steps.
+  let extOutdated = $derived(extensionOutdated(extDetected, about.extension_version));
 
   async function copyToken() {
     try {
@@ -247,6 +262,26 @@
     }
   }
 
+  // App self-update check (engine/updates.py). The binary has no package
+  // manager behind it; a pip/pipx user runs `pipx upgrade azimut` instead.
+  // Opt-in and never on mount — local-first, like the downloader check.
+  let appUpdate = $state(null); // { current, latest, update_available, url, error }
+  let checkingApp = $state(false);
+
+  async function checkAppUpdate() {
+    if (checkingApp) return;
+    checkingApp = true;
+    try {
+      appUpdate = await api.get('/api/settings/update?check=true');
+      if (appUpdate.error) toast(`Could not reach GitHub: ${appUpdate.error}`, 'danger');
+      else if (!appUpdate.update_available) toast('Azimut is up to date', 'ok');
+    } catch (e) {
+      toast(`Could not check for updates: ${e.message}`, 'danger');
+    } finally {
+      checkingApp = false;
+    }
+  }
+
   async function updateScraper(dist) {
     if (updating[dist]) return;
     updating[dist] = true;
@@ -301,7 +336,11 @@
       const v = s.free_tiers?.[k.id];
       return v === undefined || v === null ? '' : String(v);
     });
-    about = { version: s.version ?? '', workspace_root: s.workspace_root ?? '' };
+    about = {
+      version: s.version ?? '',
+      workspace_root: s.workspace_root ?? '',
+      extension_version: s.extension_version ?? '',
+    };
     ingestToken = s.ingest_token ?? '';
     home = { lat: String(s.home_view.lat), lon: String(s.home_view.lon), zoom: String(s.home_view.zoom) };
     mention = s.post_mention ?? '';
@@ -899,15 +938,26 @@
               <span class="row-hint">
                 {#if extDetected}
                   detected · <span class="mono">v{extDetected}</span>
+                  {#if extOutdated}
+                    · update bundled (<span class="mono">v{about.extension_version}</span>)
+                  {/if}
                 {:else}
                   not detected — after installing, reload this tab
                 {/if}
               </span>
             </div>
             <a class="btn btn-sm btn-primary" href="/api/ingest/extension.zip" download>
-              <Icon name="download" size={13} /> Download extension (.zip)
+              <Icon name="download" size={13} />
+              {extOutdated ? 'Download update (.zip)' : 'Download extension (.zip)'}
             </a>
           </div>
+          {#if extOutdated}
+            <p class="note warn">
+              This Azimut ships a newer capture extension (v{about.extension_version}) than the
+              v{extDetected} loaded here. Download it, replace the unpacked folder, then reload the
+              extension in your browser's extensions page. Azimut can't reload it for you.
+            </p>
+          {/if}
           <p class="note">
             Unzip it somewhere permanent and load it as an unpacked extension, then
             reload this tab. Step-by-step instructions are in the README inside the zip.
@@ -968,6 +1018,39 @@
               <Icon name="globe" size={13} /> osintmethat.com <Icon name="external" size={11} />
             </a>
           </div>
+        </section>
+
+        <section class="group">
+          <h3>Updates</h3>
+          <div class="row">
+            <div class="row-label">
+              <span>Check for a newer release</span>
+              <span class="row-hint">
+                {#if appUpdate?.update_available}
+                  <span class="mono">{appUpdate.latest}</span> is out — you have
+                  <span class="mono">{about.version}</span>
+                {:else if appUpdate && !appUpdate.error}
+                  you're on the latest (<span class="mono">{about.version}</span>)
+                {:else}
+                  looks at GitHub only when you press it
+                {/if}
+              </span>
+            </div>
+            {#if appUpdate?.update_available}
+              <a class="btn btn-sm btn-primary" href={appUpdate.url} target="_blank" rel="noreferrer">
+                <Icon name="download" size={13} /> Get {appUpdate.latest} <Icon name="external" size={11} />
+              </a>
+            {:else}
+              <button class="btn btn-sm" onclick={checkAppUpdate} disabled={checkingApp}>
+                {checkingApp ? 'Checking…' : 'Check for updates'}
+              </button>
+            {/if}
+          </div>
+          <p class="note">
+            A <span class="mono">pip</span> or <span class="mono">pipx</span> install updates with
+            <span class="mono">pipx upgrade azimut</span>. For the standalone binary, download the new
+            release and replace the file — your cases under the workspace are untouched.
+          </p>
         </section>
 
         <section class="group">
@@ -1259,6 +1342,9 @@
     font-size: var(--fs-xs);
     line-height: 1.5;
     margin-top: 8px;
+  }
+  .note.warn {
+    color: var(--warn, #d8a03d);
   }
   /* same voice as .note, but leading a group instead of trailing one */
   .intro {

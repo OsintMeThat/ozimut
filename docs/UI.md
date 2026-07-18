@@ -1,7 +1,7 @@
 # Azimut — UI & UX reference
 
 How the interface is organized (UX) and styled (UI). This is the contract new
-tools and future agents follow — not a roadmap. Feature phasing lives in
+tools and future works follow — not a roadmap. Feature phasing lives in
 [SPEC.md](SPEC.md).
 
 ## Layout anatomy
@@ -21,7 +21,7 @@ entry**; it registers in `frontend/src/lib/workspaces.js`.
 
 | Workspace | Tools today | Future tools land here |
 |---|---|---|
-| **Collect** | Media Library | Reverse Search, Channel Monitor, Evidence Locker |
+| **Collect** | Media Library, Files | Reverse Search, Channel Monitor, Evidence Locker |
 | **Examine** | Inspect (Selection / Frame / Collage / Analyze) | EXIF, OCR, Image Compare, Hints, Shadow Clock, audio |
 | **Map** | Satellite | **one map, many modes**: Compare, Ground Imagery, Coordinates, Measures, Viewshed, OSM Query, Map Board |
 | **Compose** | Proof Composer, Post Composer | Report Builder, GIF maker |
@@ -51,10 +51,14 @@ double-click resets, width persists).
 - **My work** — every saved artifact: the analyst's nested folders (the only
   user-owned taxonomy) plus an **Unfiled** inbox for the rest. File by
   dragging a row onto a folder or from the details panel (folder field).
-  Unfiling deletes nothing.
+  Unfiling deletes nothing. The **Files** tab (Collect) opens this same tree
+  as a desktop surface — small tiles, rubber-band select, drag several at once,
+  right-click a file or folder for Move to Unfiled / Delete.
 - **Details** — selection editor for any artifact: preview, title/notes,
-  provenance (created by/at, source), My-work folder, open-in-tool /
-  open-file / go-to-coords, Delete everywhere (danger confirm).
+  provenance (created by/at, source), the derivation chain (made-from /
+  used-by), My-work folder, open-in-tool / open-file / go-to-coords, Delete
+  everywhere (danger confirm). One shared body (`EntityDetails.svelte`) — the
+  sidebar panel and the Media Library's info modal render the same editor.
 
 ## Visual language (UI)
 
@@ -82,7 +86,7 @@ sober instruments.
   `frontend/src/assets/logo-source.svg`; favicon derives from the same rose.
   No other place uses brand lettering.
 
-## Adding a tool (checklist for future agents)
+## Adding a tool (checklist for future work)
 
 1. Add the component under `frontend/src/tools/`, register it in
    `App.svelte`'s `TOOLS` and in its workspace's `tools` array

@@ -8,6 +8,7 @@ import {
   proofCoordsText, proofSource, orderedFeatureColors, legendLines,
   dedupeBySrc, isSatelliteCapture, satPanelInput, mediaPanelInput,
   SIG_MARGIN, SIG_SCALE, newSignature, signatureBox, signatureOffset,
+  proofSlug, uniqueProofTitle, DEFAULT_PROOF_TITLE,
 } from './composer.js';
 
 // natural is [width, height]; PANEL_H drives the per-row scale.
@@ -775,5 +776,37 @@ describe('signatureOffset — a drag round-trips through the anchor', () => {
       const box = signatureBox({ ...sig, dx, dy }, 1000, 800, natural);
       expect(box).toMatchObject({ x: 300, y: 250 });
     }
+  });
+});
+
+describe('proofSlug — mirrors the backend _slug', () => {
+  it('lowercases, hyphenates runs of non-alphanumerics, trims edges', () => {
+    expect(proofSlug('Untitled proof')).toBe('untitled-proof');
+    expect(proofSlug('  Rooftop! @ 12:30  ')).toBe('rooftop-12-30');
+    expect(proofSlug('Café déjà')).toBe('caf-d-j');
+  });
+
+  it('falls back to "proof" when nothing survives, and caps at 80 chars', () => {
+    expect(proofSlug('')).toBe('proof');
+    expect(proofSlug('!!!')).toBe('proof');
+    expect(proofSlug(null)).toBe('proof');
+    expect(proofSlug('a'.repeat(200))).toHaveLength(80);
+  });
+});
+
+describe('uniqueProofTitle — a fresh proof reads apart from the case', () => {
+  it('returns the base when no proof carries it', () => {
+    expect(uniqueProofTitle(DEFAULT_PROOF_TITLE, new Set())).toBe('Untitled proof');
+    expect(uniqueProofTitle(DEFAULT_PROOF_TITLE, ['Rooftop'])).toBe('Untitled proof');
+  });
+
+  it('numbers past the base and any run already taken', () => {
+    expect(uniqueProofTitle(DEFAULT_PROOF_TITLE, new Set(['Untitled proof']))).toBe('Untitled proof 2');
+    const taken = ['Untitled proof', 'Untitled proof 2', 'Untitled proof 3'];
+    expect(uniqueProofTitle(DEFAULT_PROOF_TITLE, taken)).toBe('Untitled proof 4');
+  });
+
+  it('the numbered title still slugs to a distinct filename', () => {
+    expect(proofSlug(uniqueProofTitle(DEFAULT_PROOF_TITLE, ['Untitled proof']))).toBe('untitled-proof-2');
   });
 });

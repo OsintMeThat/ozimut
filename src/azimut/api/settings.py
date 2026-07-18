@@ -19,7 +19,8 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .. import __version__, config
-from ..engine import google_tiles, scrapers, sentinel, tiles
+from ..engine import google_tiles, scrapers, sentinel, tiles, updates
+from .ingest import bundled_extension_version
 
 router = APIRouter(prefix="/api", tags=["settings"])
 
@@ -118,6 +119,9 @@ def get_settings() -> dict[str, Any]:
         # About tab: what this build is, and where it keeps its files
         "version": __version__,
         "workspace_root": str(config.workspace_root()),
+        # the capture-extension version this build ships — Settings compares it
+        # to the installed one (lib/extBridge.js) to flag a stale extension
+        "extension_version": bundled_extension_version(),
         # capture-extension pairing token (api/ingest.py) — reported only if it
         # already exists; loading Settings no longer mints a credential (POST
         # /settings/ingest-token does, on the user's explicit reveal/copy)
@@ -388,6 +392,19 @@ def get_scrapers(check: bool = False) -> dict[str, Any]:
     opening Settings must never reach the network (engine/scrapers.py status()).
     """
     return {"scrapers": scrapers.status(check_pypi=check)}
+
+
+@router.get("/settings/update")
+def check_app_update(check: bool = False) -> dict[str, Any]:
+    """This build's version, and — with ``check=true`` — whether GitHub has a
+    newer release. For the binary, which has no package manager to ask.
+
+    Opt-in and user-triggered like the scraper check: without ``check`` it
+    reports the current version and touches no network (engine/updates.py).
+    """
+    if not check:
+        return {"current": __version__, "latest": None, "update_available": False}
+    return updates.check(__version__)
 
 
 @router.post("/settings/scrapers/{dist}/update")

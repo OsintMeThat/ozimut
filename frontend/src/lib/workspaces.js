@@ -10,7 +10,7 @@
  * layer (today the case sidebar covers it).
  */
 export const WORKSPACES = [
-  { id: 'collect', label: 'Collect', icon: 'download', tools: ['media'] },
+  { id: 'collect', label: 'Collect', icon: 'download', tools: ['media', 'files'] },
   { id: 'examine', label: 'Examine', icon: 'inspect', tools: ['inspect'] },
   { id: 'map', label: 'Map', icon: 'satellite', tools: ['satellite'] },
   { id: 'compose', label: 'Compose', icon: 'proof', tools: ['proof', 'post'] },

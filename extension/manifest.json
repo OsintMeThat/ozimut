@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Azimut Capture",
-  "version": "0.1.0",
-  "description": "File the map you are looking at into Azimut: one user-initiated screenshot, coordinates parsed from the URL, provenance kept.",
+  "version": "0.2.0",
+  "description": "File into Azimut: screenshot the map you are looking at (coordinates from the URL), or save any other page as a bookmark.",
   "permissions": ["activeTab", "scripting", "storage", "notifications"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "background": {

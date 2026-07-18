@@ -1325,8 +1325,9 @@
 
   // One-click grab of the whole map view into the dialog's preview: the same
   // extension frame as a framed capture, minus the crop, at native resolution.
-  // The preview is what lets the user judge it before filing. Only offered
-  // when the extension is present — without it the dialog is paste/drop only.
+  // The preview is what lets the user judge it before filing. The dialog itself
+  // is only reachable with the extension present (no extension → the gate points
+  // at Settings instead), so this grab is always available here.
   let shotGrabbing = $state(false);
   async function shotGrab() {
     if (shotGrabbing) return;
@@ -2186,21 +2187,38 @@
                   <div class="menu-row">
                     <span class="menu-label">Source</span>
                     <div class="chips">
-                      <button
-                        class="chip"
-                        onclick={() => {
-                          sizeMenuOpen = false;
-                          shotOpen = true;
-                        }}
-                      >
-                        Paste a screenshot…
-                      </button>
+                      {#if extensionVersion()}
+                        <button
+                          class="chip"
+                          onclick={() => {
+                            sizeMenuOpen = false;
+                            shotOpen = true;
+                          }}
+                        >
+                          Paste a screenshot…
+                        </button>
+                      {:else}
+                        <button
+                          class="chip"
+                          onclick={() => {
+                            sizeMenuOpen = false;
+                            extGateOpen = true;
+                          }}
+                        >
+                          Get the capture extension
+                        </button>
+                      {/if}
                     </div>
                   </div>
                   <div class="menu-hint">
-                    This basemap is captured from the screen (Google's terms allow nothing
-                    programmatic out of it), so the frame can't go past the map view and screen
-                    pixels are the ceiling.
+                    {#if extensionVersion()}
+                      This basemap is captured from the screen (Google's terms allow nothing
+                      programmatic out of it), so the frame can't go past the map view and screen
+                      pixels are the ceiling.
+                    {:else}
+                      This basemap is captured from the screen, so filing it needs the capture
+                      extension (Google's terms allow nothing programmatic out).
+                    {/if}
                   </div>
                 {:else}
                   <div class="menu-row">
@@ -2534,7 +2552,7 @@
     <p class="shot-hint">
       The <strong>Capture</strong> button already crops this basemap off the screen
       through the usual frame. Use this when it can't:
-      {#if extensionVersion()}grab the whole map view below, or paste{:else}paste{/if}
+      grab the whole map view below, or paste
       (<span class="mono">Ctrl+V</span>) / drop your own OS screenshot.
       Unlike a framed capture, this is filed at the current <em>view</em>
       (<span class="mono">{fmtCoords(center.lat, center.lon)}</span>, z{center.zoom}) —
@@ -2542,14 +2560,12 @@
       is burned into a footer either way; keep Google's on-screen credits inside the
       frame too.
     </p>
-    {#if extensionVersion()}
-      <div style="display:flex;justify-content:center;margin-bottom:10px">
-        <button class="btn btn-primary" onclick={shotGrab} disabled={shotGrabbing}>
-          {#if shotGrabbing}<span class="spinner"></span> Grabbing…{:else}
-            <Icon name="satellite" size={14} /> Capture the view{/if}
-        </button>
-      </div>
-    {/if}
+    <div style="display:flex;justify-content:center;margin-bottom:10px">
+      <button class="btn btn-primary" onclick={shotGrab} disabled={shotGrabbing}>
+        {#if shotGrabbing}<span class="spinner"></span> Grabbing…{:else}
+          <Icon name="satellite" size={14} /> Capture the view{/if}
+      </button>
+    </div>
     <div
       class="shot-zone"
       class:has-image={!!shotPreview}
@@ -2590,18 +2606,10 @@
     </p>
     <p class="shot-hint">
       Install it from <strong>Settings → Capture extension</strong>, then reload
-      this tab. You can also paste an OS screenshot instead.
+      this tab.
     </p>
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">
-      <button
-        class="btn"
-        onclick={() => {
-          extGateOpen = false;
-          shotOpen = true;
-        }}
-      >
-        Paste a screenshot…
-      </button>
+      <button class="btn" onclick={() => (extGateOpen = false)}>Cancel</button>
       <button
         class="btn btn-primary"
         onclick={() => {
