@@ -21,7 +21,7 @@
     "position:fixed;display:none;border:1.5px dashed #e8a33d;background:rgba(232,163,61,0.10);" +
     "box-shadow:0 0 0 100vmax rgba(10,10,10,0.35);pointer-events:none";
   const hint = document.createElement("div");
-  hint.textContent = "Drag to select the area to capture — Esc to cancel";
+  hint.textContent = "Drag to select the capture area. Press Esc to cancel";
   hint.style.cssText =
     "position:fixed;top:14px;left:50%;transform:translateX(-50%);padding:6px 12px;" +
     "background:#141414;color:#e6e6e6;font:13px system-ui,sans-serif;border-radius:6px;" +

@@ -380,7 +380,7 @@
             onpointerdown={(e) => e.stopPropagation()}
             onclick={() => (node.ghost = !node.ghost)}
             aria-label="Toggle piece transparency"
-            title="See through this piece to align features (view only, never exported)"
+            title="Fade this piece while aligning; not exported"
           >
             <Icon name="ghost" size={15 / scale} />
           </button>

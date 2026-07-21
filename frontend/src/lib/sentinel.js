@@ -127,6 +127,27 @@ export function cloudLabel(cloud) {
   return `${Math.round(cloud)}% cloud`;
 }
 
+/** Stable place bucket for pass and coverage caches (about 100 m). */
+export function sentinelPlaceKey(lat, lon) {
+  return `${Number(lat).toFixed(3)},${Number(lon).toFixed(3)}`;
+}
+
+/** Local API request that verifies rendered coverage for one candidate day. */
+export function coverageRequestPath({ lat, lon, layer, date }) {
+  const query = new URLSearchParams({
+    lat: String(lat),
+    lon: String(lon),
+    layer,
+    date,
+  });
+  return `/api/satellite/sentinel/coverage?${query}`;
+}
+
+/** Keep the working map unless the candidate day passed its coverage check. */
+export function dateAfterCoverage(current, candidate, available) {
+  return available ? candidate : current;
+}
+
 /**
  * The date range a date search should default to: the last `days` days, ending
  * today. Sentinel-2 revisits every ~5 days, so a month is several passes —

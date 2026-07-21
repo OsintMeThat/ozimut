@@ -381,24 +381,34 @@ describe('post targets', () => {
 });
 
 describe('postReportMarkdown', () => {
-  it('renders the prepared facts, posts and attachments as portable Markdown', () => {
-    expect(postReportMarkdown({
+  it('renders a structured report with links, maps and embedded case media', () => {
+    const report = postReportMarkdown({
       title: 'Rooftop match',
       place: 'Bakhmut, Ukraine',
       plusCode: '8FPGXXXX+XX',
       coordinates: '48.850000, 2.350000',
+      dms: '48°51′00.0″N 2°21′00.0″E',
+      mapLinks: {
+        Google: 'https://maps.example.test',
+        OSM: 'https://osm.example.test',
+      },
       description: 'Match against reference imagery.',
       source: 'https://example.test/source',
-      posts: ['First post', 'Second post'],
       attachments: ['proofs/match.png', 'media/a.jpg', 'media/a.jpg'],
-    })).toBe(
-      '# Rooftop match\n\n' +
-      '## Location\n\nPlace: Bakhmut, Ukraine\nPlus code: 8FPGXXXX+XX\nCoordinates: 48.850000, 2.350000\n\n' +
-      '## Assessment\n\nMatch against reference imagery.\n\n' +
-      '## Source\n\nhttps://example.test/source\n\n' +
-      '## Prepared posts\n\n### 1\n\nFirst post\n\n### 2\n\nSecond post\n\n' +
-      '## Attachments\n\n- proofs/match.png\n- media/a.jpg\n'
-    );
+      proofEntity: { id: 'e_proof', label: 'Rooftop proof', attrs: { path: 'proofs/match.png' } },
+      mediaEntities: [{ id: 'e_frame', label: 'Frame', attrs: { path: 'media/a.jpg', kind: 'image' } }],
+    });
+
+    expect(report).toContain('| Coordinates | `48.850000, 2.350000` |');
+    expect(report).toContain('| Maps | [Google](https://maps.example.test) · [OSM](https://osm.example.test) |');
+    expect(report).toContain('[Open original source](https://example.test/source)');
+    expect(report).toContain('## Assessment\n\nMatch against reference imagery.');
+    expect(report).not.toContain('## Prepared thread');
+    expect(report).toContain('[[entity:e_proof|Rooftop proof]]');
+    expect(report).toContain('[[media:e_proof|Rooftop proof]]{width=100% align=center}');
+    expect(report).toContain('[[entity:e_frame|Frame]]');
+    expect(report).toContain('[[media:e_frame|Frame]]{width=100% align=center}');
+    expect(report).not.toContain('- proofs/match.png');
   });
 
   it('always gives an otherwise empty export a title', () => {

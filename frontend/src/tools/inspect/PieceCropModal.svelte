@@ -12,11 +12,21 @@
   let { node, onapply, onclose } = $props();
 
   let imgEl = $state();
-  let natW = $state(node.w ?? null);
-  let natH = $state(node.h ?? null);
-  let crop = $state(node.crop ? { ...node.crop } : null);
+  let sourceNode = $state();
+  let natW = $state(null);
+  let natH = $state(null);
+  let crop = $state(null);
   let aspect = $state(null);
-  let draw = $state(!node.crop);
+  let draw = $state(false);
+
+  $effect(() => {
+    if (sourceNode === node) return;
+    sourceNode = node;
+    natW = node.w ?? null;
+    natH = node.h ?? null;
+    crop = node.crop ? { ...node.crop } : null;
+    draw = !node.crop;
+  });
 
   function onImgLoad(e) {
     natW = e.currentTarget.naturalWidth;

@@ -1,90 +1,18 @@
-<script module>
-  /**
-   * Keep selection out of pointerdown. Selecting rebuilds the Konva document,
-   * so doing it before pointerup destroys the gesture target and can strand
-   * Firefox's drag state. A click/tap or dragend is already a settled gesture.
-   */
-  export function bindPanelPointerLifecycle(group, { onPress, onSelect, onDragEnd }) {
-    const isPanelTarget = (event) =>
-      event?.target === group || event?.target?.name?.() === 'panel-hit';
-    group.on('pointerdown', (event) => {
-      if (isPanelTarget(event)) onPress(event);
-    });
-    group.on('click tap', (event) => {
-      if (isPanelTarget(event)) onSelect(event);
-    });
-    if (onDragEnd) {
-      group.on('dragend', (event) => {
-        // Konva drag events bubble. A shape dragged inside this panel must keep
-        // the shape selected and must never commit the parent panel's position.
-        if (event?.target !== group) return;
-        onSelect(event);
-        onDragEnd(event);
-      });
-    }
-  }
-
-  /**
-   * Coalesce document rebuilds and keep them out of an active pointer gesture.
-   * Replacing Konva nodes between pointerdown and pointerup can leave Firefox
-   * dispatching the rest of the gesture to a node that no longer exists.
-   */
-  export function createCanvasRenderGate(schedule, cancel, { rebuild, refreshUi }) {
-    let pointerActive = false;
-    let rebuildPending = false;
-    let uiPending = false;
-    let frame = null;
-
-    function arm() {
-      if (pointerActive || (!rebuildPending && !uiPending) || frame !== null) return;
-      frame = schedule(() => {
-        frame = null;
-        if (pointerActive || (!rebuildPending && !uiPending)) return;
-        const needsRebuild = rebuildPending;
-        const needsUi = uiPending;
-        rebuildPending = false;
-        uiPending = false;
-        if (needsRebuild) rebuild();
-        else if (needsUi) refreshUi();
-      });
-    }
-
-    return {
-      beginPointer() {
-        pointerActive = true;
-      },
-      endPointer() {
-        pointerActive = false;
-        arm();
-      },
-      requestRebuild() {
-        rebuildPending = true;
-        arm();
-      },
-      requestUi() {
-        uiPending = true;
-        arm();
-      },
-      destroy() {
-        if (frame !== null) cancel(frame);
-        frame = null;
-        rebuildPending = false;
-        uiPending = false;
-        pointerActive = false;
-      },
-    };
-  }
-</script>
-
 <script>
   import { onMount } from 'svelte';
   import Konva from 'konva';
   import { api } from '../lib/api.js';
+  import { lookupEntity, fetchAllEntities } from '../lib/catalog.js';
   import { caseState, uiState, ensureCase, reloadCase, toast, prefs, fmtCoords } from '../lib/state.svelte.js';
   import { templatesState } from '../lib/state.svelte.js';
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import ProofToolbar from './proof/ProofToolbar.svelte';
+  import ProofCanvas from './proof/ProofCanvas.svelte';
+  import ProofLayersPanel from './proof/ProofLayersPanel.svelte';
+  import NewProofDialog from './proof/NewProofDialog.svelte';
+  import { bindPanelPointerLifecycle, createCanvasRenderGate } from './proof/canvasLifecycle.js';
   import {
     ANNO_COLORS, PAD, GAP, ROW_GAP, PANEL_H, TWEET_GUIDES,
     CAPTION_SIZE, LEGEND_SIZE, FOOTER_SIZE,
@@ -171,22 +99,51 @@
   // next Save writes a deleted proof back into the case under its old name.
   // The canvas itself is left alone: the work on screen is still the analyst's.
   $effect(() => {
+    const id = caseState.current?.id;
     caseState.rev;
-    const entities = caseState.current?.entities ?? [];
-    if (savedName && !entities.some((e) => e.attrs?.spec === `proofs/${savedName}.json`)) {
-      savedName = null;
-      dirty = true;
-      toast('The saved proof was deleted — saving now files a new one', 'warn');
-    }
+    const name = savedName;
+    if (!id || !name) return;
+    let live = true;
+    lookupEntity(id, 'spec', `proofs/${name}.json`).then((bound) => {
+      if (live && !bound && savedName === name) {
+        savedName = null;
+        dirty = true;
+        toast('The saved proof was deleted. Saving now creates a new one', 'warn');
+      }
+    });
+    return () => { live = false; };
   });
+
+  // Every saved proof (its slugs and titles) and every current media/capture
+  // path, read a page at a time off the bounded catalog and the media shelves
+  // rather than the case-open payload. Refreshed on case change and after any
+  // reload elsewhere.
+  let proofEntities = $state([]);
+  let presentPaths = $state(new Set());
+  $effect(() => {
+    const id = caseState.current?.id;
+    caseState.rev;
+    if (!id) {
+      proofEntities = [];
+      presentPaths = new Set();
+      return;
+    }
+    let live = true;
+    fetchAllEntities(id, { types: ['proof'] })
+      .then((list) => { if (live) proofEntities = list; })
+      .catch(() => { if (live) proofEntities = []; });
+    Promise.all([api.get(`/api/cases/${id}/media`), api.get(`/api/cases/${id}/satellite`)])
+      .then(([media, sat]) => {
+        if (live) presentPaths = new Set([...media, ...sat].map((it) => it.path));
+      })
+      .catch(() => { if (live) presentPaths = new Set(); });
+    return () => { live = false; };
+  });
+
   // Panels whose media was deleted: the image already drawn stays on the canvas,
   // but the panel is flagged so a re-save is not silently building on a ghost.
   const gonePanels = $derived(
-    caseState.current
-      ? proof.panels.filter(
-          (p) => !(caseState.current.entities ?? []).some((e) => e.attrs?.path === p.src)
-        )
-      : []
+    caseState.current ? proof.panels.filter((p) => !presentPaths.has(p.src)) : []
   );
   let tool = $state('select');
   let color = $state(ANNO_COLORS[0]);
@@ -314,7 +271,7 @@
   }
 
   // ---- konva ------------------------------------------------------------------
-  let containerEl;
+  let containerEl = $state();
   let stage, docLayer, uiLayer, transformer, endHandles, guideGroup, panelCtrls;
   let canvasRenderGate;
   let drawing = null; // {panel, node, start, box, kind}
@@ -1917,12 +1874,12 @@
   // Every proof already saved in this case, read off the filed entities: the
   // slugs (filename without `proofs/…​.json`) to catch a filename collision, and
   // the titles so a fresh proof can take a title that reads apart from them.
-  const savedProofNames = () => savedProofSlugs(caseState.current?.entities);
-  const savedProofTitles = () => libSavedProofTitles(caseState.current?.entities);
+  const savedProofNames = () => savedProofSlugs(proofEntities);
+  const savedProofTitles = () => libSavedProofTitles(proofEntities);
 
   // Title of a saved proof by its slug, for the overwrite prompt.
   function savedProofTitle(name) {
-    return libSavedProofTitle(caseState.current?.entities, name);
+    return libSavedProofTitle(proofEntities, name);
   }
 
   // Default title for a fresh proof, numbered past any already in the case so
@@ -2083,7 +2040,7 @@
 
 <div class="tool">
   <div class="tool-header">
-    <h2>Proof Composer</h2>
+    <h2>Geo Proof</h2>
     {#if proofStarted}
       <input
         class="input title-input"
@@ -2119,140 +2076,39 @@
   </div>
 
   <div class="body">
-    <!-- left: drawing toolbar -->
-    <div class="toolbar">
-      <button class="tb-btn" title="Undo (Ctrl+Z)" disabled={!canUndo} onclick={undo}>
-        <Icon name="undo" size={18} />
-      </button>
-      <button class="tb-btn" title="Redo (Ctrl+Shift+Z / Ctrl+Y)" disabled={!canRedo} onclick={redo}>
-        <Icon name="redo" size={18} />
-      </button>
-      <div class="tb-sep"></div>
-      {#each DRAW_TOOLS as t (t.id)}
-        <button
-          class="tb-btn"
-          class:active={tool === t.id}
-          title="{t.label} ({t.shortcut})"
-          onclick={() => (tool = t.id)}
-        >
-          <Icon name={t.icon} size={18} />
-        </button>
-      {/each}
-      <div class="tb-sep"></div>
-      {#each proof.palette as c (c)}
-        <button
-          class="color-btn"
-          class:active={activeColor === c}
-          style:background={c}
-          title="Same color = same feature"
-          onclick={() => setColor(c)}
-          aria-label={`color ${c}`}
-        ></button>
-      {/each}
-      <label
-        class="color-btn color-pick"
-        class:active={!proof.palette.includes(activeColor)}
-        style:background={activeColor}
-        title="Custom color"
-      >
-        <Icon name="plus" size={12} />
-        <input
-          type="color"
-          value={activeColor}
-          oninput={(e) => setColor(e.target.value)}
-          aria-label="custom color"
-        />
-      </label>
-      <div class="tb-sep"></div>
-      <input
-        class="stroke-slider"
-        type="range"
-        min={selectedShape?.kind === 'text' ? 8 : 1}
-        max={selectedShape?.kind === 'text' ? 120 : 24}
-        step="1"
-        value={selectedShape?.kind === 'text'
-          ? (selectedShape.fontSize ?? 28)
-          : (selectedShape?.strokeWidth ?? strokeW)}
-        oninput={(e) => setStroke(+e.target.value)}
-        title={selectedShape?.kind === 'text' ? 'Font size' : selectedShape ? 'Stroke width (selected)' : 'Stroke width'}
-      />
-      <div class="tb-sep"></div>
-      <button class="tb-btn" title="Fit view (f)" onclick={fit}><Icon name="eye" size={18} /></button>
-      <div class="tb-sep"></div>
-      <button
-        class="tb-btn"
-        class:active={proof.layout !== 'free'}
-        title="Grid layout: panels flow in rows"
-        onclick={() => setLayoutMode('grid')}
-      >
-        <Icon name="grid" size={18} />
-      </button>
-      <button
-        class="tb-btn"
-        class:active={proof.layout === 'free'}
-        title="Free layout: drag panels anywhere"
-        onclick={() => setLayoutMode('free')}
-      >
-        <Icon name="layers" size={18} />
-      </button>
-      <div class="tb-sep"></div>
-      {#each Object.keys(TWEET_GUIDES) as g (g)}
-        <button
-          class="tb-btn tb-guide"
-          class:active={guide === g}
-          title={`Preview the ${g} tweet crop — everything outside is cut off`}
-          onclick={() => (guide = guide === g ? null : g)}
-        >{g}</button>
-      {/each}
-      <button
-        class="tb-btn tb-magic"
-        title={`Auto-fit for a tweet — re-pack panels toward ${guide ?? '16:9'} and reset panel sizes`}
-        disabled={!proof.panels.length}
-        onclick={applyMagic}
-      >
-        <Icon name="wand" size={18} />
-      </button>
-    </div>
+    <ProofToolbar
+      {canUndo}
+      {canRedo}
+      {undo}
+      {redo}
+      drawTools={DRAW_TOOLS}
+      bind:tool
+      palette={proof.palette}
+      {activeColor}
+      {selectedShape}
+      {strokeW}
+      {setColor}
+      {setStroke}
+      {fit}
+      layout={proof.layout}
+      {setLayoutMode}
+      bind:guide
+      tweetGuides={TWEET_GUIDES}
+      panelCount={proof.panels.length}
+      {applyMagic}
+    />
 
-    <!-- canvas -->
-    <div class="canvas-wrap" class:drawing={tool !== 'select'}>
-      <div class="konva" bind:this={containerEl}></div>
-      {#if textEdit}
-        <input
-          class="text-edit"
-          style:left={`${textEdit.left}px`}
-          style:top={`${textEdit.top}px`}
-          style:font-size={`${textEdit.size}px`}
-          style:color={textEdit.color}
-          bind:value={textEdit.value}
-          use:focusSelect
-          onblur={() => commitTextEdit(true)}
-          onkeydown={(e) => {
-            e.stopPropagation();
-            if (e.key === 'Enter') commitTextEdit(true);
-            else if (e.key === 'Escape') commitTextEdit(false);
-          }}
-        />
-      {/if}
-      {#if !proofHasContent}
-        <div class="empty overlay-empty">
-          <div class="empty-icon"><Icon name="proof" size={42} /></div>
-          {#if proofStarted}
-            <h3>No panels yet</h3>
-            <p>Add panels when you are ready.</p>
-            <button class="btn" onclick={openPicker}>
-              <Icon name="plus" size={15} /> Add panel
-            </button>
-          {:else}
-            <h3>Compose a proof</h3>
-            <p>Create a proof to choose its template and starting panels.</p>
-            <button class="btn" onclick={openNewProofDialog}>
-              <Icon name="plus" size={15} /> New proof
-            </button>
-          {/if}
-        </div>
-      {/if}
-    </div>
+    <ProofCanvas
+      bind:containerEl
+      {tool}
+      {textEdit}
+      {focusSelect}
+      {commitTextEdit}
+      {proofHasContent}
+      {proofStarted}
+      {openPicker}
+      {openNewProofDialog}
+    />
 
     <!-- right: proof settings, panels & annotations -->
     {#if proofStarted}
@@ -2268,7 +2124,7 @@
               <button
                 class="tpl-settings-link"
                 type="button"
-                title="Open Settings → Templates to create, edit or delete house styles"
+                title="Manage proof styles in Settings"
                 onclick={openTemplateSettings}
               >
                 Settings templates
@@ -2309,7 +2165,7 @@
             <Icon name="crosshair" size={13} />
             <span>Coordinates</span>
             {#if !displayedCoords}
-              <span class="meta-warn" title="No satellite panel yet — add one or type the coordinates">
+              <span class="meta-warn" title="Add a satellite panel or type the coordinates">
                 <Icon name="alert" size={13} />
               </span>
             {/if}
@@ -2351,191 +2207,33 @@
           />
         </div>
 
-        <div class="side-title-row" style="margin-top: 14px">
-          <button class="side-title collapsible" onclick={() => (collapsed.panels = !collapsed.panels)}>
-            <span><Icon name={collapsed.panels ? 'chevronRight' : 'chevronDown'} size={13} /> Panels <span class="count">{proof.panels.length}</span></span>
-          </button>
-          <button
-            class="btn btn-ghost btn-sm side-add"
-            title="Add a panel"
-            onclick={openPicker}
-          >
-            <Icon name="plus" size={13} />
-          </button>
-        </div>
-        {#if !collapsed.panels}
-        {#if gonePanels.length}
-          <!-- A panel's media was deleted from the case. The proof keeps it: the
-               pixels are already composed into the export (ONTOLOGY §3). Only
-               reopening this proof later would come up empty. -->
-          <div class="gone-note">
-            <Icon name="alert" size={12} />
-            <span>
-              {gonePanels.length} panel{gonePanels.length > 1 ? 's' : ''} whose media was deleted.
-              The proof still exports; reopening it later will show them blank.
-            </span>
-          </div>
-        {/if}
-        {#each proof.panels as panel, i (panel.id)}
-          <div class="panel-row card" class:selected={selectedPanelId === panel.id} class:gone={gonePanels.includes(panel)}>
-            <button
-              class="panel-thumb"
-              title="Select this panel on the canvas"
-              onclick={() => (selectedPanelId = selectedPanelId === panel.id ? null : panel.id)}
-            >
-              <img src={`/files/${caseState.current?.id}/${panel.src}`} alt="" />
-              {#if proof.layout === 'free'}
-                <span class="row-badge" title="Stacking order — Z1 is the foreground">Z{i + 1}</span>
-              {:else}
-                <span class="row-badge" title="Row (top→bottom)">R{(panel.row ?? 0) + 1}</span>
-              {/if}
-            </button>
-            <input
-              class="input cap-input"
-              placeholder="Caption…"
-              bind:value={panel.caption}
-              onchange={() => (dirty = true)}
-            />
-            <!-- one compact row: z-order (free only) · size · delete — moving a
-                 grid panel happens on the canvas (select it, use the arrows) -->
-            <div class="panel-actions">
-              {#if proof.layout === 'free'}
-                <button class="btn btn-ghost btn-sm" disabled={i === 0} title="Bring forward (toward Z1)" onclick={() => movePanelZ(i, -1)}>
-                  <Icon name="chevronUp" size={13} />
-                </button>
-                <button class="btn btn-ghost btn-sm" disabled={i === proof.panels.length - 1} title="Send backward" onclick={() => movePanelZ(i, 1)}>
-                  <Icon name="chevronDown" size={13} />
-                </button>
-              {/if}
-              <div class="panel-scale" title="Panel size — elements scale with it">
-                <button
-                  class="btn btn-ghost btn-sm"
-                  disabled={(panel.scale ?? 1) <= SCALE_MIN}
-                  title="Shrink panel"
-                  onclick={() => scalePanel(i, -SCALE_STEP)}
-                >−</button>
-                <span class="scale-val">{Math.round((panel.scale ?? 1) * 100)}%</span>
-                <button
-                  class="btn btn-ghost btn-sm"
-                  disabled={(panel.scale ?? 1) >= SCALE_MAX}
-                  title="Enlarge panel"
-                  onclick={() => scalePanel(i, SCALE_STEP)}
-                >+</button>
-              </div>
-              <button class="btn btn-ghost btn-sm" style="margin-left:auto" title="Remove panel" onclick={() => removePanel(i)}>
-                <Icon name="trash" size={13} />
-              </button>
-            </div>
-          </div>
-        {/each}
-        {/if}
-
-        <!-- Annotations: one legend note per color (feature), not per element -->
-        <button class="side-title collapsible" style="margin-top: 14px" onclick={() => (collapsed.annotations = !collapsed.annotations)}>
-          <span><Icon name={collapsed.annotations ? 'chevronRight' : 'chevronDown'} size={13} /> Annotations <span class="count">{featureList.length}</span></span>
-        </button>
-        {#if !collapsed.annotations}
-        {#if !featureList.length}
-          <div class="none">Draw on a panel. Same color = same feature.</div>
-        {/if}
-        {#each featureList as c, i (c)}
-          <div class="anno-row" class:active={activeColor === c}>
-            <div class="reorder">
-              <button class="btn btn-ghost reorder-btn" disabled={i === 0} title="Move up" onclick={() => moveLegendColor(i, -1)}>
-                <Icon name="chevronUp" size={11} />
-              </button>
-              <button class="btn btn-ghost reorder-btn" disabled={i === featureList.length - 1} title="Move down" onclick={() => moveLegendColor(i, 1)}>
-                <Icon name="chevronDown" size={11} />
-              </button>
-            </div>
-            <button
-              class="chip-num"
-              style:background={c}
-              title="Select this color"
-              onclick={() => setColor(c)}
-            >{i + 1}</button>
-            <input
-              class="input comment-input"
-              placeholder={`Feature ${i + 1} legend…`}
-              bind:value={proof.notes[c]}
-              onchange={() => (dirty = true)}
-            />
-          </div>
-        {/each}
-        {/if}
-
-        <!-- Elements: every drawn shape, for quick select / delete -->
-        <button class="side-title collapsible" style="margin-top: 14px" onclick={() => (collapsed.elements = !collapsed.elements)}>
-          <span><Icon name={collapsed.elements ? 'chevronRight' : 'chevronDown'} size={13} /> Elements <span class="count">{proof.shapes.length}</span></span>
-        </button>
-        {#if !collapsed.elements}
-        {#each proof.shapes as s, i (s.id)}
-          <div
-            class="shape-row"
-            class:selected={selectedId === s.id}
-            onclick={() => (selectedId = s.id)}
-            role="button"
-            tabindex="0"
-            onkeydown={(e) => e.key === 'Enter' && (selectedId = s.id)}
-          >
-            <div class="reorder">
-              <button class="btn btn-ghost reorder-btn" disabled={!canMoveShapeUp(i)} title="Move up (z-order within its panel)" onclick={(e) => { e.stopPropagation(); moveShape(i, -1); }}>
-                <Icon name="chevronUp" size={11} />
-              </button>
-              <button class="btn btn-ghost reorder-btn" disabled={!canMoveShapeDown(i)} title="Move down (z-order within its panel)" onclick={(e) => { e.stopPropagation(); moveShape(i, 1); }}>
-                <Icon name="chevronDown" size={11} />
-              </button>
-            </div>
-            <span class="chip" style:background={s.color}></span>
-            <Icon name={KIND_ICON[s.kind]} size={13} />
-            {#if s.kind === 'text'}
-              <input
-                class="input comment-input"
-                placeholder="Text…"
-                bind:value={s.text}
-                onchange={() => (dirty = true)}
-                onclick={(e) => e.stopPropagation()}
-              />
-              <button
-                class="btn btn-ghost btn-sm"
-                class:active={s.frame}
-                title="Frame (border in the text's color)"
-                onclick={(e) => { e.stopPropagation(); s.frame = !s.frame; dirty = true; }}
-              >
-                <Icon name="square" size={13} />
-              </button>
-              <label
-                class="color-btn color-pick bg-pick"
-                class:active={!!s.bg}
-                style:background={s.bg || 'transparent'}
-                title="Background color"
-                onclick={(e) => e.stopPropagation()}
-              >
-                <Icon name="plus" size={11} />
-                <input
-                  type="color"
-                  value={s.bg || '#000000'}
-                  oninput={(e) => { s.bg = e.target.value; dirty = true; }}
-                  aria-label="text background color"
-                />
-              </label>
-              {#if s.bg}
-                <button class="btn btn-ghost btn-sm" title="Remove background" onclick={(e) => { e.stopPropagation(); s.bg = null; dirty = true; }}>
-                  <Icon name="x" size={11} />
-                </button>
-              {/if}
-            {:else}
-              <span class="el-label">{KIND_LABEL[s.kind]} <span class="el-id">#{i + 1}</span></span>
-            {/if}
-            <button class="btn btn-ghost btn-sm" title="Duplicate (Ctrl+D)" onclick={(e) => { e.stopPropagation(); duplicateShape(s.id); }}>
-              <Icon name="copy" size={13} />
-            </button>
-            <button class="btn btn-ghost btn-sm" title="Delete" onclick={(e) => { e.stopPropagation(); deleteShape(s.id); }}>
-              <Icon name="trash" size={13} />
-            </button>
-          </div>
-        {/each}
-        {/if}
+        <ProofLayersPanel
+          {proof}
+          {collapsed}
+          {gonePanels}
+          bind:selectedPanelId
+          bind:selectedId
+          {activeColor}
+          caseId={caseState.current?.id}
+          scaleMin={SCALE_MIN}
+          scaleMax={SCALE_MAX}
+          scaleStep={SCALE_STEP}
+          {openPicker}
+          {movePanelZ}
+          {scalePanel}
+          {removePanel}
+          {featureList}
+          {moveLegendColor}
+          {setColor}
+          {canMoveShapeUp}
+          {canMoveShapeDown}
+          {moveShape}
+          kindIcon={KIND_ICON}
+          kindLabel={KIND_LABEL}
+          {duplicateShape}
+          {deleteShape}
+          markDirty={() => (dirty = true)}
+        />
 
         <!-- Advanced: text sizes, editable footer, signature (the trickier knobs) -->
         <button class="adv-toggle" onclick={() => (advancedOpen = !advancedOpen)} style="margin-top: 14px">
@@ -2694,112 +2392,22 @@
 </div>
 
 {#if newProofOpen}
-  <Modal
-    title="Create proof"
-    onclose={() => { if (!creatingProof) newProofOpen = false; }}
-    width="780px"
-  >
-    <form class="new-proof-form" onsubmit={(e) => { e.preventDefault(); requestNewProofCreation(); }}>
-      <label class="new-proof-field">
-        <span>Name</span>
-        <input
-          class="input"
-          bind:value={newProofName}
-          maxlength="200"
-          placeholder="Proof name"
-        />
-      </label>
-
-      <label class="new-proof-field">
-        <span>Template</span>
-        <select class="input" bind:value={newProofTemplateId}>
-          <option value="">No template</option>
-          {#each templatesState.proof as t (t.id)}
-            <option value={t.id}>{t.name}</option>
-          {/each}
-        </select>
-        <small>Sets the look without choosing content.</small>
-      </label>
-
-      <fieldset class="new-proof-panels">
-        <legend>
-          <span>Panels</span>
-          <span class="selected-count">
-            {newProofPanelPaths.length} panel{newProofPanelPaths.length === 1 ? '' : 's'} selected
-          </span>
-        </legend>
-
-        <div class="panel-picker-bar">
-          <div class="panel-search">
-            <Icon name="search" size={13} />
-            <input placeholder="Search panels…" bind:value={newProofQuery} />
-            {#if newProofQuery}
-              <button type="button" onclick={() => (newProofQuery = '')} aria-label="Clear search">
-                <Icon name="x" size={12} />
-              </button>
-            {/if}
-          </div>
-          <div class="panel-categories" aria-label="Panel categories">
-            <button
-              type="button"
-              class:active={newProofCategory === 'all'}
-              onclick={() => (newProofCategory = 'all')}
-            >All <span>{pickerItems.length}</span></button>
-            <button
-              type="button"
-              class:active={newProofCategory === 'satellite'}
-              onclick={() => (newProofCategory = 'satellite')}
-            >Satellite captures <span>{pickerItems.filter((item) => item.kind === 'satellite').length}</span></button>
-            <button
-              type="button"
-              class:active={newProofCategory === 'media'}
-              onclick={() => (newProofCategory = 'media')}
-            >Other images <span>{pickerItems.filter((item) => item.kind === 'media').length}</span></button>
-          </div>
-        </div>
-
-        {#if newProofLoading}
-          <div class="picker-empty">Loading case images…</div>
-        {:else if !pickerItems.length}
-          <div class="picker-empty">No case images yet, but you can add panels later.</div>
-        {:else if !filteredNewProofItems.length}
-          <div class="picker-empty">No panels match this search.</div>
-        {:else}
-          <div class="pick-grid new-proof-grid">
-            {#each filteredNewProofItems as item (item.src)}
-              <button
-                type="button"
-                class="pick card selectable-pick"
-                class:selected={newProofPanelPaths.includes(item.src)}
-                aria-pressed={newProofPanelPaths.includes(item.src)}
-                onclick={() => toggleNewProofPanel(item.src)}
-              >
-                <span class="pick-image">
-                  <img src={`/files/${caseState.current?.id}/${item.thumb}`} alt="" loading="lazy" />
-                  {#if newProofPanelPaths.includes(item.src)}
-                    <span class="pick-selected"><Icon name="check" size={13} /></span>
-                  {/if}
-                </span>
-                <span class="pick-label" title={item.label}>
-                  <Icon name={item.kind === 'satellite' ? 'satellite' : 'image'} size={12} />
-                  {item.label}
-                </span>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </fieldset>
-
-      <div class="new-proof-actions">
-        <button type="button" class="btn" disabled={creatingProof} onclick={() => (newProofOpen = false)}>
-          Cancel
-        </button>
-        <button type="submit" class="btn btn-primary" disabled={!newProofName.trim() || creatingProof}>
-          <Icon name="plus" size={15} /> {creatingProof ? 'Creating…' : 'Create proof'}
-        </button>
-      </div>
-    </form>
-  </Modal>
+  <NewProofDialog
+    bind:name={newProofName}
+    bind:templateId={newProofTemplateId}
+    bind:panelPaths={newProofPanelPaths}
+    bind:query={newProofQuery}
+    bind:category={newProofCategory}
+    templates={templatesState.proof}
+    items={pickerItems}
+    filteredItems={filteredNewProofItems}
+    loading={newProofLoading}
+    creating={creatingProof}
+    caseId={caseState.current?.id}
+    togglePanel={toggleNewProofPanel}
+    requestCreation={requestNewProofCreation}
+    close={() => (newProofOpen = false)}
+  />
 {/if}
 
 {#if replaceWithNewConfirm}
@@ -2919,125 +2527,6 @@
     width: min(320px, 26vw);
     font-weight: 600;
   }
-  .new-proof-form {
-    display: flex;
-    flex-direction: column;
-    gap: 15px;
-  }
-  .new-proof-field {
-    display: grid;
-    grid-template-columns: 110px minmax(0, 1fr);
-    align-items: center;
-    gap: 5px 12px;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-  }
-  .new-proof-field small {
-    grid-column: 2;
-    color: var(--text-3);
-    font-weight: 400;
-  }
-  .new-proof-panels {
-    min-width: 0;
-    padding: 0;
-    border: 0;
-  }
-  .new-proof-panels legend {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 7px;
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    color: var(--text-2);
-  }
-  .selected-count { color: var(--text-3); font-weight: 500; }
-  .panel-picker-bar {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 7px;
-    margin-bottom: 10px;
-    min-width: 0;
-  }
-  .panel-search {
-    min-width: 170px;
-    flex: 1;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    background: var(--bg-2);
-    color: var(--text-3);
-  }
-  .panel-search:focus-within { border-color: var(--accent); }
-  .panel-search input {
-    width: 100%;
-    min-width: 0;
-    border: 0;
-    outline: 0;
-    background: transparent;
-    color: var(--text-1);
-    font: inherit;
-  }
-  .panel-search button { display: flex; color: var(--text-3); }
-  .panel-categories { display: flex; gap: 5px; overflow-x: auto; max-width: 100%; }
-  .panel-categories button {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 5px 8px;
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    background: var(--bg-2);
-    color: var(--text-2);
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-  }
-  .panel-categories button:hover { border-color: var(--border-strong); color: var(--text-1); }
-  .panel-categories button.active { border-color: var(--accent); color: var(--text-1); }
-  .panel-categories span { color: var(--text-3); }
-  .new-proof-grid {
-    max-height: min(42vh, 390px);
-    overflow-y: auto;
-    padding: 1px;
-  }
-  .selectable-pick { position: relative; }
-  .selectable-pick.selected { border-color: var(--accent); }
-  .pick-image { position: relative; display: block; }
-  .pick-selected {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    width: 22px;
-    height: 22px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 50%;
-    background: var(--accent);
-    color: var(--accent-text);
-  }
-  .picker-empty {
-    min-height: 120px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-    border: 1px dashed var(--border);
-    border-radius: var(--r-md);
-    color: var(--text-3);
-    font-size: var(--fs-sm);
-  }
-  .new-proof-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    padding-top: 2px;
-  }
   .tpl-none {
     margin: 0 0 6px;
     font-size: var(--fs-xs);
@@ -3049,104 +2538,6 @@
     display: flex;
     min-height: 0;
   }
-  .toolbar {
-    width: 52px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 6px;
-    padding: 12px 0;
-    border-right: 1px solid var(--border);
-    background: var(--bg-1);
-  }
-  .tb-btn {
-    width: 38px;
-    height: 38px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: var(--r-sm);
-    color: var(--text-3);
-  }
-  .tb-btn:hover { color: var(--text-1); background: var(--bg-2); }
-  .tb-btn.active { color: var(--text-1); background: var(--bg-3); }
-  .tb-guide { font-size: 11px; font-weight: 700; }
-  .tb-magic:not(:disabled) { color: var(--accent); }
-  .tb-magic:not(:disabled):hover { background: var(--accent-soft); }
-  .tb-magic:disabled { opacity: 0.4; cursor: default; }
-  .tb-sep {
-    width: 26px;
-    height: 1px;
-    background: var(--border);
-    margin: 4px 0;
-  }
-  .color-btn {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    border: 2px solid transparent;
-    transition: border-color 0.12s var(--ease);
-    flex-shrink: 0;
-  }
-  .color-btn:hover {
-    border-color: var(--text-3);
-  }
-  .color-btn.active {
-    border-color: var(--text-1);
-    box-shadow: 0 0 0 2px var(--bg-1), 0 0 0 3.5px var(--text-3);
-  }
-  .color-pick {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--accent-text);
-    cursor: pointer;
-    position: relative;
-    overflow: hidden;
-  }
-  .color-pick input {
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    cursor: pointer;
-  }
-  .stroke-slider {
-    width: 80px;
-    transform: rotate(-90deg);
-    margin: 34px 0;
-    accent-color: var(--accent);
-  }
-  .canvas-wrap {
-    position: relative;
-    flex: 1;
-    min-width: 0;
-    background:
-      radial-gradient(circle at 1px 1px, rgba(148, 163, 196, 0.07) 1px, transparent 0) 0 0 / 22px 22px,
-      var(--bg-0);
-  }
-  .canvas-wrap.drawing { cursor: crosshair; }
-  .konva { position: absolute; inset: 0; }
-  .tb-btn:disabled { opacity: 0.35; cursor: default; }
-  .tb-btn:disabled:hover { color: var(--text-3); background: none; }
-  .text-edit {
-    position: absolute;
-    transform: translateY(-2px);
-    min-width: 60px;
-    padding: 0 2px;
-    font-family: system-ui, sans-serif;
-    font-weight: 700;
-    background: rgba(14, 14, 14, 0.85);
-    border: 1px dashed var(--accent);
-    border-radius: 2px;
-    outline: none;
-  }
-  .overlay-empty {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-  }
-  .overlay-empty .btn { pointer-events: auto; }
   .side {
     width: 300px;
     flex-shrink: 0;
@@ -3160,35 +2551,6 @@
     overflow-y: auto;
     padding: 12px;
   }
-  .side-title {
-    font-size: var(--fs-xs);
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--text-2);
-    margin-bottom: 8px;
-    display: flex;
-    justify-content: space-between;
-  }
-  .side-title.collapsible {
-    width: 100%;
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    text-align: left;
-    font: inherit;
-    color: inherit;
-  }
-  .side-title.collapsible span {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .side-title-row { display: flex; align-items: center; gap: 4px; }
-  .side-title-row .side-title { margin-bottom: 0; }
-  .side-add { margin-left: auto; color: var(--text-3); }
-  .count { color: var(--text-3); }
   .meta-field { margin-bottom: 10px; }
   .meta-head {
     display: flex;
@@ -3234,58 +2596,6 @@
   .tpl-inline-link:hover { color: var(--text-2); }
   .meta-input { width: 100%; font-size: var(--fs-xs); padding: 5px 8px; }
   .meta-input.warn { border-color: color-mix(in srgb, var(--warn, #e8a33d) 55%, transparent); }
-  .gone-note {
-    display: flex;
-    align-items: flex-start;
-    gap: 6px;
-    margin-bottom: 8px;
-    padding: 7px 9px;
-    border-radius: var(--r-sm);
-    font-size: var(--fs-xs);
-    line-height: 1.4;
-    color: color-mix(in srgb, var(--danger, #e5484d) 80%, var(--text-2));
-    background: color-mix(in srgb, var(--danger, #e5484d) 10%, transparent);
-  }
-  .gone-note :global(svg) { flex-shrink: 0; margin-top: 2px; }
-  .panel-row.gone {
-    border-color: color-mix(in srgb, var(--danger, #e5484d) 40%, transparent);
-  }
-  .panel-row {
-    padding: 8px;
-    margin-bottom: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .panel-thumb {
-    position: relative;
-    display: block;
-    width: 100%;
-    padding: 0;
-    border: none;
-    background: none;
-    cursor: pointer;
-  }
-  .panel-row.selected { border-color: var(--accent); }
-  .panel-row img {
-    width: 100%;
-    max-height: 90px;
-    object-fit: cover;
-    border-radius: var(--r-sm);
-    background: var(--bg-2);
-    display: block;
-  }
-  .row-badge {
-    position: absolute;
-    top: 5px;
-    left: 5px;
-    padding: 1px 6px;
-    border-radius: var(--r-sm);
-    font-size: 10px;
-    font-weight: 700;
-    color: var(--text-1);
-    background: rgba(14, 14, 14, 0.72);
-  }
   .adv-toggle {
     display: flex;
     align-items: center;
@@ -3354,110 +2664,6 @@
     color: var(--accent);
     border-color: var(--accent);
   }
-  .cap-input { font-size: var(--fs-xs); padding: 5px 8px; }
-  .panel-actions { display: flex; align-items: center; gap: 2px; }
-  .panel-scale {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    margin: 0 auto; /* centres the size control between z-order and delete */
-  }
-  .scale-val {
-    min-width: 42px;
-    text-align: center;
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-2);
-    font-variant-numeric: tabular-nums;
-  }
-  .none {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    padding: 2px 2px 8px;
-  }
-  .anno-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 3px 4px;
-    border-radius: var(--r-sm);
-    margin-bottom: 4px;
-    border: 1px solid transparent;
-  }
-  .anno-row.active { border-color: var(--accent); background: var(--accent-soft); }
-  .reorder {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    flex-shrink: 0;
-  }
-  .reorder-btn {
-    padding: 0 2px;
-    line-height: 1;
-    color: var(--text-3);
-  }
-  .reorder-btn:disabled { opacity: 0.25; cursor: default; }
-  .bg-pick {
-    width: 20px;
-    height: 20px;
-    flex-shrink: 0;
-    border: 1px dashed var(--border);
-  }
-  .bg-pick.active { border-style: solid; }
-  .bg-pick:not(.active) { color: var(--text-3); }
-  .chip-num {
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    flex-shrink: 0;
-    font-size: 11px;
-    font-weight: 700;
-    color: var(--accent-text);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 2px solid transparent;
-    cursor: pointer;
-  }
-  .chip-num:hover { border-color: var(--text-1); }
-  .el-label {
-    flex: 1;
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .el-id { color: var(--text-3); }
-  .shape-row {
-    display: flex;
-    align-items: center;
-    gap: 7px;
-    padding: 5px 6px;
-    border-radius: var(--r-sm);
-    margin-bottom: 3px;
-    border: 1px solid transparent;
-    color: var(--text-3);
-    cursor: pointer;
-  }
-  .shape-row:hover { background: var(--bg-2); }
-  .shape-row.selected { border-color: var(--accent); background: var(--accent-soft); }
-  .chip {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-  .comment-input {
-    flex: 1;
-    font-size: var(--fs-xs);
-    padding: 4px 8px;
-    background: transparent;
-    border-color: transparent;
-    min-width: 0;
-  }
-  .comment-input:hover, .comment-input:focus { background: var(--bg-2); border-color: var(--border); }
   .pick-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));

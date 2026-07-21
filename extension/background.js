@@ -48,7 +48,7 @@ async function cropDataUrl(dataUrl, rect, viewportW) {
 /** File one screenshot with the backend (POST /api/ingest/screenshot). */
 async function ingest(blob, meta) {
   const { backendUrl, token } = await settings();
-  if (!token) throw new Error("not paired — open the extension options and paste the token from Azimut Settings");
+  if (!token) throw new Error("not paired. Open the extension options and paste the token from Azimut Settings");
   // Thin on purpose: image + URL is a complete capture — the app parses the
   // URL itself (site, coordinates, title, imagery date). Everything else here
   // is either the user's popup corrections or plain context.
@@ -70,9 +70,9 @@ async function ingest(blob, meta) {
       body: form,
     });
   } catch {
-    throw new Error(`Azimut is not reachable at ${backendUrl} — is the app running?`);
+    throw new Error(`Azimut is not reachable at ${backendUrl}. Is the app running?`);
   }
-  if (r.status === 401) throw new Error("pairing token rejected — re-pair in the extension options");
+  if (r.status === 401) throw new Error("pairing token rejected. Pair again in the extension options");
   if (!r.ok) throw new Error(`Azimut refused the capture (${r.status}): ${(await r.text()).slice(0, 200)}`);
   const body = await r.json();
   // Remember where this capture landed — including a freshly minted scratch

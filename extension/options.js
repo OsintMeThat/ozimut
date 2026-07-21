@@ -27,13 +27,13 @@ async function init() {
         headers: { "X-Azimut-Token": token },
       });
       if (r.status === 401) {
-        status("Azimut answered but rejected the token — copy it again from Settings.", "error");
+        status("Azimut answered but rejected the token. Copy it again from Settings.", "error");
         return;
       }
       const body = await r.json();
-      status(`Paired with Azimut ${body.version} — you're set.`, "ok");
+      status(`Paired with Azimut ${body.version}.`, "ok");
     } catch {
-      status(`No Azimut at ${backendUrl} — is the app running?`, "error");
+      status(`No Azimut at ${backendUrl}. Is the app running?`, "error");
     }
   });
 }

@@ -1,7 +1,10 @@
 <script>
   import { api } from '../lib/api.js';
+  import { lookupEntity, fetchDerivation } from '../lib/catalog.js';
   import { caseState, uiState, toast, reloadCase, prefs } from '../lib/state.svelte.js';
   import { templatesState } from '../lib/state.svelte.js';
+  import { createNote } from '../lib/notes.js';
+  import { openNotebook } from '../lib/navigate.js';
   import { proofCoordsText, proofSource, DEFAULT_PROOF_TITLE } from '../lib/composer.js';
   import {
     buildTweet1 as buildTweet1Lines, DEFAULT_TWEET_BODY,
@@ -15,6 +18,7 @@
   import Icon from '../components/Icon.svelte';
   import Modal from '../components/Modal.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
+  import FolderSelect from '../components/FolderSelect.svelte';
 
   let coordsText = $state('');
   let geo = $state(null); // {lat, lon, dms, plus_code, links}
@@ -53,18 +57,35 @@
   // name. The thread on screen stays — a post outlives its proof (ONTOLOGY §3),
   // it only loses the attachment.
   $effect(() => {
+    const id = caseState.current?.id;
     caseState.rev;
-    const entities = caseState.current?.entities ?? [];
-    if (draftName && !entities.some((e) => e.attrs?.draft === `exports/${draftName}.json`)) {
-      draftName = null;
-      toast('The saved draft was deleted — saving now files a new one', 'warn');
-    }
-    if (proofPng && !entities.some((e) => e.attrs?.path === proofPng)) {
-      setProof(null);
-      toast('The attached proof was deleted — the thread text is untouched', 'warn');
-    }
+    const draft = draftName;
+    const proof = proofPng;
+    if (!id) return;
+    let live = true;
+    (async () => {
+      if (draft) {
+        const bound = await lookupEntity(id, 'draft', `exports/${draft}.json`);
+        if (live && !bound && draftName === draft) {
+          draftName = null;
+          toast('The saved draft was deleted. Saving now creates a new one', 'warn');
+        }
+      }
+      if (proof) {
+        const bound = await lookupEntity(id, 'path', proof);
+        if (live && !bound && proofPng === proof) {
+          setProof(null);
+          toast('The attached proof was deleted. The thread text is unchanged', 'warn');
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
   });
   let saving = $state(false);
+  let reportModal = $state(null); // { title, folder }
+  let reportSaving = $state(false);
   let discardConfirm = $state(false);
   let openList = $state(null); // list of saved drafts, null = closed
 
@@ -72,6 +93,26 @@
   let pickerOpen = $state(false);
   let mediaLibrary = $state([]);
   let mediaPickerTarget = $state(null); // null = tweet 2; an id = a later media tweet
+
+  // path → media kind, from our own /media shelf, so attach chips can label a
+  // video without scanning the whole entity graph. Refreshed on case change.
+  let kindByPath = $state(new Map());
+  $effect(() => {
+    const id = caseState.current?.id;
+    caseState.rev;
+    if (!id) {
+      kindByPath = new Map();
+      return;
+    }
+    let live = true;
+    api
+      .get(`/api/cases/${id}/media`)
+      .then((items) => {
+        if (live) kindByPath = new Map(items.map((it) => [it.path, it.kind]));
+      })
+      .catch(() => { if (live) kindByPath = new Map(); });
+    return () => { live = false; };
+  });
 
   // Proof picker modal
   let proofPickerOpen = $state(false);
@@ -397,8 +438,14 @@
   async function preloadProofMedia(png, proofSourceUrl) {
     if (!png || !proofSourceUrl || !caseState.current) return;
     try {
-      const library = await api.get(`/api/cases/${caseState.current.id}/media`);
-      const linkedMedia = proofSourceMediaPaths(caseState.current, png, proofSourceUrl, library);
+      const cid = caseState.current.id;
+      const proof = await lookupEntity(cid, 'path', png);
+      if (!proof) return;
+      const [library, graph] = await Promise.all([
+        api.get(`/api/cases/${cid}/media`),
+        fetchDerivation(cid, proof.id),
+      ]);
+      const linkedMedia = proofSourceMediaPaths(graph, png, proofSourceUrl, library);
       if (!linkedMedia.length) return;
 
       const selected = new Set([
@@ -470,7 +517,7 @@
   }
 
   function mediaKind(path) {
-    return caseState.current?.entities.find((e) => e.attrs?.path === path)?.attrs?.kind ?? 'image';
+    return kindByPath.get(path) ?? 'image';
   }
 
   const proofHref = $derived(
@@ -707,26 +754,85 @@
     if (!hasContent) target = normalizePostTarget(prefs.postTarget);
   });
 
-  async function copyReport() {
-    const attachments = [
+  function reportAttachmentPaths() {
+    return [
       proofPng,
       ...mediaPaths,
       ...extraTweets.flatMap((tweet) => tweet.mediaPaths),
-    ];
+    ].filter(Boolean);
+  }
+
+  async function reportEntities() {
+    if (!caseState.current) return { proofEntity: null, mediaEntities: [] };
+    const paths = [...new Set(reportAttachmentPaths())];
+    const resolved = await Promise.all(paths.map(async (path) => {
+      try {
+        return [path, await lookupEntity(caseState.current.id, 'path', path)];
+      } catch {
+        return [path, null];
+      }
+    }));
+    const byPath = new Map(resolved.filter(([, entity]) => entity));
+    return {
+      proofEntity: proofPng ? byPath.get(proofPng) ?? null : null,
+      mediaEntities: paths
+        .filter((path) => path !== proofPng)
+        .map((path) => byPath.get(path))
+        .filter(Boolean),
+    };
+  }
+
+  function reportContent(title = draftTitle(), evidence = {}) {
     const coordinates = geo
       ? `${geo.lat.toFixed(6)}, ${geo.lon.toFixed(6)}`
       : coordsText.trim();
-    await navigator.clipboard.writeText(postReportMarkdown({
-      title: draftTitle(),
+    return postReportMarkdown({
+      title,
       place,
       plusCode: geo?.plus_code,
       coordinates,
+      dms: geo?.dms,
+      mapLinks: geo?.links,
       description,
       source,
-      posts: threadParts(),
-      attachments,
-    }));
-    toast('Markdown report copied', 'ok', 1800);
+      attachments: reportAttachmentPaths(),
+      ...evidence,
+    });
+  }
+
+  function openSaveReport() {
+    if (!caseState.current) {
+      toast('Open a case to save a report', 'warn');
+      return;
+    }
+    reportModal = { title: draftTitle(), folder: '' };
+  }
+
+  async function saveReport() {
+    if (!reportModal || !caseState.current) return;
+    if (!reportModal.title.trim()) {
+      toast('Title required', 'warn');
+      return;
+    }
+    reportSaving = true;
+    try {
+      const evidence = await reportEntities();
+      const note = await createNote(caseState.current.id, {
+        title: reportModal.title,
+        folder: reportModal.folder,
+        content: reportContent(reportModal.title.trim(), evidence),
+      });
+      await reloadCase();
+      reportModal = null;
+      toast('Report saved as a note', 'ok', 6000, {
+        label: 'OPEN',
+        onClick: () => openNotebook(note.id),
+      });
+    } catch (error) {
+      toast(`Report not saved: ${error.message}`, 'danger');
+    } finally {
+      reportSaving = false;
+    }
   }
 
   // ---- publish handoff (Azimut never posts on the analyst's behalf) --------
@@ -743,7 +849,7 @@
 <div class="tool">
   <div class="tool-header">
     <div class="head-text">
-      <h2>Post Composer</h2>
+      <h2>Geo Report</h2>
     </div>
     <div class="head-actions">
       {#if caseState.current}
@@ -758,6 +864,9 @@
       {/if}
       <button class="btn btn-ghost btn-sm" onclick={saveDraft} disabled={saving}>
         <Icon name="save" size={14} /> {draftName ? 'Save draft' : 'Save as draft'}
+      </button>
+      <button class="btn btn-ghost btn-sm" onclick={openSaveReport} disabled={!hasContent || reportSaving}>
+        <Icon name="file" size={14} /> Save report
       </button>
       <button class="btn btn-primary btn-sm" onclick={publish} disabled={!tweet1.trim()} title={`Copy posts and open ${targetInfo.label}`}>
         <Icon name="post" size={14} /> Publish on {targetInfo.label}
@@ -793,7 +902,7 @@
               <button
                 class="tpl-settings-link"
                 type="button"
-                title="Open Settings → Templates to create, edit or delete thread templates"
+                title="Manage thread templates in Settings"
                 onclick={openTemplateSettings}
               >
                 Settings templates
@@ -822,7 +931,7 @@
               <button
                 class="tpl-inline-link"
                 type="button"
-                title="Open Settings → Templates to create your first thread template"
+                title="Create a thread template in Settings"
                 onclick={openTemplateSettings}
               >
                 Create one in Settings → Templates.
@@ -1145,15 +1254,30 @@
           <button class="btn btn-ghost btn-sm" onclick={copyAll}>
             <Icon name="copy" size={13} /> Copy all
           </button>
-          <button class="btn btn-ghost btn-sm" onclick={copyReport} title="Copy as Markdown">
-            <Icon name="file" size={13} /> Copy report
-          </button>
         </div>
 
       </div>
     </div>
   </div>
 </div>
+
+{#if reportModal}
+  <Modal title="Save report as note" onclose={() => (reportModal = null)} width="580px">
+    <label class="modal-label" for="report-note-title">Title</label>
+    <input id="report-note-title" class="input" placeholder="Report title…" bind:value={reportModal.title} />
+
+    <span class="modal-label" style="margin-top:10px">Folder (in My work)</span>
+    <FolderSelect bind:value={reportModal.folder} folders={caseState.current?.folders ?? []} emptyLabel="My work (root)" />
+
+    <div class="modal-row">
+      <div style="flex:1"></div>
+      <button class="btn" onclick={() => (reportModal = null)}>Cancel</button>
+      <button class="btn btn-primary" onclick={saveReport} disabled={reportSaving}>
+        {reportSaving ? 'Saving…' : 'Save report'}
+      </button>
+    </div>
+  </Modal>
+{/if}
 
 {#if openList}
   <Modal title="Open a saved draft" onclose={() => (openList = null)} width="560px">

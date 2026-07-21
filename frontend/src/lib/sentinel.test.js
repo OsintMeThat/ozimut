@@ -14,6 +14,9 @@ import {
   monthBounds,
   monthGrid,
   defaultSearchWindow,
+  sentinelPlaceKey,
+  coverageRequestPath,
+  dateAfterCoverage,
   DEFAULT_LAYER,
   SENTINEL_ID,
 } from './sentinel.js';
@@ -165,5 +168,33 @@ describe('defaultSearchWindow', () => {
   it('covers several revisits (Sentinel-2 passes every ~5 days)', () => {
     const now = new Date(Date.UTC(2026, 6, 14));
     expect(defaultSearchWindow(30, now)).toEqual({ from: '2026-06-14', to: '2026-07-14' });
+  });
+});
+
+describe('coverage checks', () => {
+  it('buckets nearby map centres together', () => {
+    expect(sentinelPlaceKey(48.85837, 2.29448)).toBe('48.858,2.294');
+  });
+
+  it('builds a request for the selected layer, day and exact crosshair', () => {
+    const path = coverageRequestPath({
+      lat: 48.8584,
+      lon: 2.2945,
+      layer: 'FALSE_COLOR',
+      date: '2026-05-11',
+    });
+    const url = new URL(path, 'http://localhost');
+    expect(url.pathname).toBe('/api/satellite/sentinel/coverage');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      lat: '48.8584',
+      lon: '2.2945',
+      layer: 'FALSE_COLOR',
+      date: '2026-05-11',
+    });
+  });
+
+  it('keeps the working date when the candidate has no imagery', () => {
+    expect(dateAfterCoverage('2026-05-06', '2026-05-11', false)).toBe('2026-05-06');
+    expect(dateAfterCoverage('2026-05-06', '2026-05-11', true)).toBe('2026-05-11');
   });
 });

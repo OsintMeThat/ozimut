@@ -116,7 +116,7 @@
   // into each piece's recipe — bounded and undistorted however far you panned, at
   // the cost of the corner handles.
   const MODES = [
-    { id: 'planar', label: 'Planar', hint: 'One flat surface — a facade, the ground, a map. Pieces stay warpable.' },
+    { id: 'planar', label: 'Planar', hint: 'One flat surface such as a facade, the ground or a map. Pieces stay warpable.' },
     { id: 'cylindrical', label: 'Cylindrical', hint: 'A camera panning sideways. Bounded and even end to end.' },
     { id: 'spherical', label: 'Spherical', hint: 'A camera that pans *and* tilts. Same, over both axes.' },
   ];
@@ -157,7 +157,7 @@
       selectedIds = [];
       const placed = res.nodes.length;
       if (res.dropped.length) {
-        toast(`Stitched ${placed} — ${res.dropped.length} left in place (no overlap found)`, 'warn');
+        toast(`Stitched ${placed}. ${res.dropped.length} left in place because no overlap was found`, 'warn');
       } else {
         toast(`Stitched ${placed} pieces`, 'ok');
       }
@@ -218,7 +218,7 @@
     {#if session.frames.length === 0}<p class="empty">No frames captured yet.</p>{/if}
   </div>
 
-  <p class="hint">Exported as a <strong>transparent PNG</strong> — only the pieces, trimmed to their bounds on save.</p>
+  <p class="hint">Exports only the pieces as a <strong>transparent PNG</strong>, trimmed to their bounds.</p>
 
   {#if selected}
     <div class="section">
@@ -276,7 +276,7 @@
     <div class="section-head"><span>Auto panorama</span></div>
     <p class="hint">
       Solves the layout from the overlapping imagery itself, then drops the pieces back on the
-      canvas — still draggable, so you can hand-tune the machine's guess.
+      canvas. You can still drag pieces to correct the result.
     </p>
     <div class="modes">
       {#each MODES as m (m.id)}
@@ -413,7 +413,7 @@
     bottom: 3px;
     right: 3px;
     background: var(--accent);
-    color: #10141c;
+    color: var(--accent-text);
     border-radius: 4px;
     display: flex;
     padding: 1px;

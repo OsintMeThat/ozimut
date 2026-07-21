@@ -46,11 +46,11 @@ async function loadCases(select, stored) {
     if (r.status === 401) throw new Error("unpaired");
     cases = await r.json();
   } catch (e) {
-    select.replaceChildren(new Option("Azimut unreachable — check options", ""));
+    select.replaceChildren(new Option("Azimut unreachable. Check options", ""));
     status(
       e.message === "unpaired"
         ? "Not paired: open the extension options and paste the token from Azimut Settings."
-        : `Cannot reach Azimut at ${backendUrl} — is the app running?`,
+        : `Cannot reach Azimut at ${backendUrl}. Is the app running?`,
       "error"
     );
     return false;
@@ -109,7 +109,7 @@ async function init() {
     }
     parsed = await r.json();
   } catch {
-    status(`Cannot reach Azimut at ${stored.backendUrl} — is the app running?`, "error");
+    status(`Cannot reach Azimut at ${stored.backendUrl}. Is the app running?`, "error");
     return;
   }
 
@@ -160,7 +160,7 @@ async function init() {
     if (!paired) return;
     // half a coordinate would 422 server-side; catch it where it's fixable
     if ((numOrNull("lat") === null) !== (numOrNull("lon") === null)) {
-      status("Latitude and longitude go together — fill both or neither.", "error");
+      status("Latitude and longitude go together. Fill both or neither.", "error");
       return;
     }
     const r = await api.runtime.sendMessage({

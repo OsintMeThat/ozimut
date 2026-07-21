@@ -1,9 +1,11 @@
 <script>
   import { api } from '../lib/api.js';
+  import { lookupEntity } from '../lib/catalog.js';
   import { caseState, uiState, reloadCase, toast } from '../lib/state.svelte.js';
   import {
-    adjustDefaults, buildOps, previewStyle, isNeutral, uid, videoSeed, initialQuad, VIDEO_ADJUST_IDS,
-    collageBounds, quadFromCropRect, cropImgStyle, cropAspect, styleText,
+    adjustDefaults, buildFrameOps, previewStyle, uid, videoSeed, initialQuad, VIDEO_ADJUST_IDS,
+    collageBounds, quadFromCropRect, cropImgStyle, cropAspect, styleText, hasVideoEdits,
+    normalizeRightAngleRotation, rotationOps,
   } from '../lib/inspect.js';
   import { createHistory } from '../lib/history.js';
   import { IDENTITY, matrixCss, rotateAbout, isIdentity, matrixAngleDeg, pointerAngleDeg } from '../lib/frameRotate.js';
@@ -17,6 +19,7 @@
   import SaveGallery from './inspect/SaveGallery.svelte';
   import SaveMenu from './inspect/SaveMenu.svelte';
   import PieceCropModal from './inspect/PieceCropModal.svelte';
+  import VideoPlayer from './inspect/VideoPlayer.svelte';
 
   // The Inspect tool is a *scratch workspace*. Opening a photo/video starts a
   // session; captured frames, per-frame adjustments, video tuning and a collage
@@ -63,6 +66,7 @@
   const session = $state({
     source: null,
     videoAdjust: {},
+    videoRotation: 0,
     frames: [],
     activeFrameId: null,
     collages: [_firstCollage],
@@ -137,6 +141,12 @@
     shared.seekTo = Math.min(Math.max((shared.currentTime ?? 0) + delta, 0), duration);
   }
 
+  function toggleVideoPlayback() {
+    if (!videoEl) return;
+    if (videoEl.paused) videoEl.play().catch(() => {});
+    else videoEl.pause();
+  }
+
   function onWindowKeydown(e) {
     if (uiState.tool !== 'inspect') return;
     const t = e.target;
@@ -159,6 +169,7 @@
     else if (e.key === 'ArrowRight') { e.preventDefault(); stepVideo(e.shiftKey ? 1 : frameDur); }
     else if (e.key === ',') { e.preventDefault(); stepVideo(-frameDur); }
     else if (e.key === '.') { e.preventDefault(); stepVideo(frameDur); }
+    else if (e.key === ' ') { e.preventDefault(); toggleVideoPlayback(); }
   }
 
   // keep-alive: tools stay mounted when another tab is shown — silence the video
@@ -187,6 +198,7 @@
   // applied (Enter / Apply), a committed *preview* showing the cropped result.
   // Re-opening crop (button or double-click) goes back to editing the original.
   let cropEditing = $state(false);
+  let frameOrientationBusy = $state(false);
 
   const videoFilters = $derived(filters.filter((f) => VIDEO_ADJUST_IDS.includes(f.id)));
   const tabs = $derived(
@@ -195,13 +207,22 @@
   const activeFrame = $derived(session.frames.find((f) => f.id === session.activeFrameId) ?? null);
   const framePreview = $derived(activeFrame ? previewStyle(filters, activeFrame.adjust) : { filter: '', transform: '' });
   const videoPreview = $derived(previewStyle(videoFilters, session.videoAdjust));
+  const videoRotation = $derived(normalizeRightAngleRotation(session.videoRotation));
+  const videoQuarterTurn = $derived(Math.abs(videoRotation) === 90);
+  const videoPreviewTransform = $derived(
+    [videoPreview.transform, videoRotation ? `rotate(${videoRotation}deg)` : ''].filter(Boolean).join(' ')
+  );
 
   const savables = $derived.by(() => {
     const out = [];
     const cid = caseState.current?.id;
-    if (session.source?.kind === 'video' && !isNeutral(videoFilters, session.videoAdjust)) {
+    if (session.source?.kind === 'video' && hasVideoEdits(videoFilters, session.videoAdjust, videoRotation)) {
       const t = session.source.thumbnail ? `/files/${cid}/${session.source.thumbnail}` : null;
-      out.push({ key: 'video', kind: 'video', label: 'Video 1', thumb: t, saved: !!session.saved.video });
+      out.push({
+        key: 'video', kind: 'video', label: 'Video 1', thumb: t,
+        filter: videoPreview.filter, transform: videoPreviewTransform,
+        saved: !!session.saved.video,
+      });
     }
     let imgN = 0;
     for (const fr of session.frames) {
@@ -288,17 +309,33 @@
   // binding instead: Save then files a new one, deliberately.
   let sourceGone = $state(false);
   $effect(() => {
-    caseState.rev;
-    const list = caseState.current?.entities ?? [];
-    if (
-      openedSession &&
-      !list.some((e) => e.attrs?.spec === `inspect/${openedSession.name}.json`)
-    ) {
-      openedSession = null;
-      toast('The saved session was deleted — saving now files a new one', 'warn');
-    }
+    const id = caseState.current?.id;
+    caseState.rev; // re-check after a delete elsewhere
+    const sessionName = openedSession?.name;
     const path = session.source?.path;
-    sourceGone = !!path && !list.some((e) => e.attrs?.path === path);
+    if (!id) {
+      sourceGone = false;
+      return;
+    }
+    let live = true;
+    (async () => {
+      if (sessionName) {
+        const bound = await lookupEntity(id, 'spec', `inspect/${sessionName}.json`);
+        if (live && !bound && openedSession?.name === sessionName) {
+          openedSession = null;
+          toast('The saved session was deleted. Saving now creates a new one', 'warn');
+        }
+      }
+      if (path) {
+        const ent = await lookupEntity(id, 'path', path);
+        if (live) sourceGone = !ent;
+      } else if (live) {
+        sourceGone = false;
+      }
+    })();
+    return () => {
+      live = false;
+    };
   });
 
   function mediaLabel(m) {
@@ -310,6 +347,7 @@
     for (const fr of session.frames) if (fr.url?.startsWith('blob:')) URL.revokeObjectURL(fr.url);
     session.source = null;
     session.videoAdjust = {};
+    session.videoRotation = 0;
     session.frames = [];
     session.activeFrameId = null;
     const c0 = makeCollage('Collage 1');
@@ -358,7 +396,7 @@
   function makeFrame(path, time, url) {
     return {
       id: uid('fr'), path, time, url,
-      adjust: adjustDefaults(filters), crop: null,
+      adjust: adjustDefaults(filters), crop: null, sourceOps: [], rotation: 0,
       w: probeInfo?.width, h: probeInfo?.height,
     };
   }
@@ -433,8 +471,13 @@
   // -- frame capture (Selection) -------------------------------------------
   async function capture(time) {
     try {
-      const url = await renderUrl(session.source.path, time, []);
+      const sourceOps = rotationOps(videoRotation);
+      const url = await renderUrl(session.source.path, time, sourceOps);
       const frame = makeFrame(session.source.path, time, url);
+      const dim = await imageSize(url);
+      frame.sourceOps = sourceOps;
+      frame.w = dim.w;
+      frame.h = dim.h;
       // frames captured from a tuned video inherit those gear adjustments
       frame.adjust = videoSeed(filters, session.videoAdjust);
       session.frames.push(frame);
@@ -451,7 +494,7 @@
     const cl = activeCollage;
     if (!cl) return;
     try {
-      const ops = buildOps(filters, frame.adjust, frame.crop);
+      const ops = buildFrameOps(filters, frame);
       const url = await renderUrl(frame.path, frame.time, ops);
       const dim = await imageSize(url);
       const count = cl.nodes.length;
@@ -531,6 +574,34 @@
     // collage pieces are independent snapshots — they stay.
     delete session.saved[`frame:${id}`];
     if (session.activeFrameId === id) session.activeFrameId = session.frames[0]?.id ?? null;
+  }
+
+  async function setFrameRotation(angle) {
+    const frame = activeFrame;
+    if (!frame || frameOrientationBusy) return;
+    const rotation = normalizeRightAngleRotation(angle);
+    frameOrientationBusy = true;
+    try {
+      const url = await renderUrl(frame.path, frame.time, [
+        ...(frame.sourceOps ?? []),
+        ...rotationOps(rotation),
+      ]);
+      const dim = await imageSize(url);
+      if (!session.frames.includes(frame)) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      const oldUrl = frame.url;
+      frame.url = url;
+      frame.rotation = rotation;
+      frame.w = dim.w;
+      frame.h = dim.h;
+      if (oldUrl?.startsWith('blob:')) URL.revokeObjectURL(oldUrl);
+    } catch (e) {
+      toast(e.message, 'danger');
+    } finally {
+      frameOrientationBusy = false;
+    }
   }
 
   // -- frame viewer: zoom / pan / straighten (Frame tab) -------------------
@@ -681,7 +752,7 @@
         .map((it) => ({
           path: it.frame.path,
           time: it.frame.time ?? null,
-          ops: buildOps(filters, it.frame.adjust, it.frame.crop),
+          ops: buildFrameOps(filters, it.frame),
         }));
       if (frameItems.length) {
         await api.post(`/api/cases/${cid}/inspect/save-frames`, { items: frameItems, folder });
@@ -689,7 +760,7 @@
       }
       if (chosen.some((it) => it.kind === 'video')) {
         await api.post(`/api/cases/${cid}/inspect/enhance-video`, {
-          path: session.source.path, params: session.videoAdjust, folder,
+          path: session.source.path, params: session.videoAdjust, rotation: videoRotation, folder,
         });
         session.saved.video = true;
       }
@@ -726,9 +797,12 @@
     return {
       source: { path: session.source.path, kind: session.source.kind },
       videoAdjust: { ...session.videoAdjust },
+      videoRotation,
       activeFrameId: session.activeFrameId,
       frames: session.frames.map((f) => ({
-        id: f.id, path: f.path, time: f.time, adjust: { ...f.adjust }, crop: f.crop, w: f.w, h: f.h,
+        id: f.id, path: f.path, time: f.time, adjust: { ...f.adjust }, crop: f.crop,
+        sourceOps: f.sourceOps ?? [], rotation: normalizeRightAngleRotation(f.rotation),
+        w: f.w, h: f.h,
       })),
       activeCollageId: session.activeCollageId,
       collages: session.collages.map((cl) => ({
@@ -805,10 +879,13 @@
         probeInfo = { kind: src.kind };
       }
       session.videoAdjust = spec.videoAdjust ?? adjustDefaults(videoFilters);
+      session.videoRotation = normalizeRightAngleRotation(spec.videoRotation);
       for (const f of spec.frames ?? []) {
         try {
-          const url = await renderUrl(f.path, f.time, []);
-          session.frames.push({ ...f, url });
+          const sourceOps = f.sourceOps ?? [];
+          const rotation = normalizeRightAngleRotation(f.rotation);
+          const url = await renderUrl(f.path, f.time, [...sourceOps, ...rotationOps(rotation)]);
+          session.frames.push({ ...f, sourceOps, rotation, url });
         } catch {
           /* skip a frame whose source is gone */
         }
@@ -958,17 +1035,16 @@
     <div class="workspace">
       <div class="viewer" class:pad={activeTab !== 'collage' && activeTab !== 'save'}>
         {#if activeTab === 'selection'}
-          <div class="frame">
-            <!-- svelte-ignore a11y_media_has_caption -->
-            <video
-              bind:this={videoEl}
-              src={`/files/${caseState.current?.id}/${session.source.path}`}
-              controls
-              ontimeupdate={() => (shared.currentTime = videoEl?.currentTime ?? 0)}
-              style:filter={videoPreview.filter}
-              style:transform={videoPreview.transform}
-            ></video>
-          </div>
+          <VideoPlayer
+            bind:video={videoEl}
+            src={`/files/${caseState.current?.id}/${session.source.path}`}
+            filter={videoPreview.filter}
+            transform={videoPreviewTransform}
+            quarterTurn={videoQuarterTurn}
+            duration={probeInfo?.duration ?? 0}
+            currentTime={shared.currentTime}
+            ontimeupdate={(time) => (shared.currentTime = time)}
+          />
         {:else if activeTab === 'frame'}
           {#if activeFrame}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1064,7 +1140,12 @@
         {#if activeTab === 'selection'}
           <SelectionMenu {probeInfo} {shared} {videoFilters} {session} {capture} />
         {:else if activeTab === 'frame'}
-          <FrameMenu {session} {filters} {analyses} {activeFrame} {shared} {removeFrame} bind:cropAspect={frameAspect} bind:cropEditing {beginCrop} {commitCrop} setActive={(id) => (session.activeFrameId = id)} />
+          <FrameMenu
+            {session} {filters} {analyses} {activeFrame} {shared} {removeFrame}
+            bind:cropAspect={frameAspect} bind:cropEditing {beginCrop} {commitCrop}
+            setRotation={setFrameRotation} rotationBusy={frameOrientationBusy}
+            setActive={(id) => (session.activeFrameId = id)}
+          />
         {:else if activeTab === 'collage'}
           <CollageMenu {session} {filters} bind:selectedIds={collageSelectedIds} {addToCollage} {requestCrop} {renderPiece} />
         {:else if activeTab === 'save'}
@@ -1167,10 +1248,6 @@
     font-size: var(--fs-lg);
     font-weight: 700;
   }
-  .sub {
-    color: var(--text-3);
-    font-size: var(--fs-sm);
-  }
   .spacer {
     flex: 1;
   }
@@ -1262,18 +1339,6 @@
   }
   .viewer.pad {
     padding: 18px;
-  }
-  .frame {
-    position: relative;
-    display: inline-block;
-    line-height: 0;
-    touch-action: none;
-    box-shadow: var(--shadow-2);
-  }
-  .frame video {
-    max-width: 100%;
-    max-height: calc(100vh - var(--topbar-h) - 160px);
-    display: block;
   }
   /* Frame tab: a zoom/pan/rotate surface with the crop overlay on top. */
   .frame-viewport {

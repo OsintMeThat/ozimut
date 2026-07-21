@@ -30,7 +30,7 @@
               <CollagePreview collage={it.collage} />
             {/if}
           {:else if it.thumb}
-            <img src={it.thumb} alt={it.label} style:filter={it.filter} />
+            <img src={it.thumb} alt={it.label} style:filter={it.filter} style:transform={it.transform} />
           {:else}
             <Icon name={it.kind === 'collage' ? 'layers' : it.kind === 'video' ? 'video' : 'image'} size={30} />
           {/if}
@@ -147,7 +147,7 @@
   .card.sel .tick {
     background: var(--accent);
     border-color: var(--accent);
-    color: #10141c;
+    color: var(--accent-text);
   }
   .label {
     font-size: var(--fs-sm);
