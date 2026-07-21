@@ -3,10 +3,11 @@ import { render } from 'svelte/server';
 
 vi.mock('konva', () => ({ default: {} }));
 
-import ProofComposer, {
+import ProofComposer from './ProofComposer.svelte';
+import {
   bindPanelPointerLifecycle,
   createCanvasRenderGate,
-} from './ProofComposer.svelte';
+} from './proof/canvasLifecycle.js';
 
 describe('Proof Composer empty state', () => {
   it('hides proof-specific chrome until a proof is started', () => {

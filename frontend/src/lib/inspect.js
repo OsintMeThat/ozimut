@@ -25,6 +25,20 @@ export function adjustDefaults(filters) {
 // tuned video inherits them so it looks like it came from the modified clip.
 export const VIDEO_ADJUST_IDS = ['brightness', 'contrast', 'saturation', 'gamma', 'grayscale', 'invert'];
 
+// Video orientation is deliberately discrete: right-angle turns keep the full
+// frame and map directly to ffmpeg's geometry filters.
+export const RIGHT_ANGLE_ROTATIONS = [-180, -90, 0, 90, 180];
+
+export function normalizeRightAngleRotation(value) {
+  const angle = Number(value);
+  return RIGHT_ANGLE_ROTATIONS.includes(angle) ? angle : 0;
+}
+
+export function rotationOps(value) {
+  const angle = normalizeRightAngleRotation(value);
+  return angle ? [{ op: 'rotate', params: { angle } }] : [];
+}
+
 /** Seed a new frame's adjust values from the current video-gear values. */
 export function videoSeed(filters, videoAdjust) {
   const out = adjustDefaults(filters);
@@ -56,6 +70,10 @@ export function isNeutral(filters, values) {
   return filters.every((f) => (values[f.id] ?? defaultOf(f)) === defaultOf(f));
 }
 
+export function hasVideoEdits(filters, values, rotation) {
+  return normalizeRightAngleRotation(rotation) !== 0 || !isNeutral(filters, values);
+}
+
 /** Turn slider values (+ optional fractional crop) into the backend op pipeline. */
 export function buildOps(filters, values, crop = null) {
   values = values ?? {};
@@ -67,6 +85,15 @@ export function buildOps(filters, values, crop = null) {
     ops.push({ op: id, params: { [paramName(f)]: values[id] } });
   }
   return ops;
+}
+
+/** Build the full recipe for a captured frame, including its video orientation. */
+export function buildFrameOps(filters, frame) {
+  return [
+    ...(frame?.sourceOps ?? []),
+    ...rotationOps(frame?.rotation),
+    ...buildOps(filters, frame?.adjust, frame?.crop),
+  ];
 }
 
 /**

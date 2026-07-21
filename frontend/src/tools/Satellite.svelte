@@ -3,6 +3,7 @@
   import L from 'leaflet';
   import 'leaflet/dist/leaflet.css';
   import { api } from '../lib/api.js';
+  import { fetchAllEntities } from '../lib/catalog.js';
   import {
     caseState, uiState, ensureCase, reloadCase, toast, prefs, fmtCoords, prefsReady,
   } from '../lib/state.svelte.js';
@@ -10,7 +11,7 @@
   import * as measure from '../lib/measure.js';
   import * as gridSearch from '../lib/gridSearch.js';
   import { dragBearing, pivotPanOffset } from '../lib/satRotate.js';
-  import { SIZE_MIN, SIZE_MAX, clampSize, scaledCapture } from '../lib/captureSize.js';
+  import { clampSize, scaledCapture } from '../lib/captureSize.js';
   import { isRegistered, sourceRect, frameFitsView } from '../lib/screenCrop.js';
   import { extensionVersion, captureTab, onActivated } from '../lib/extBridge.js';
   import {
@@ -33,6 +34,9 @@
     monthBounds,
     monthGrid,
     addMonths,
+    sentinelPlaceKey,
+    coverageRequestPath,
+    dateAfterCoverage,
   } from '../lib/sentinel.js';
   import { createViewer, nextZ, restack } from '../lib/refViewers.js';
   import { loadGoogleMaps, createSatelliteMutant } from '../lib/gmaps.js';
@@ -40,6 +44,10 @@
   import Modal from '../components/Modal.svelte';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
   import RefViewer from './RefViewer.svelte';
+  import MapToolCluster from './satellite/MapToolCluster.svelte';
+  import GridSearchPanel from './satellite/GridSearchPanel.svelte';
+  import SentinelPicker from './satellite/SentinelPicker.svelte';
+  import CaptureOptions from './satellite/CaptureOptions.svelte';
 
   let mapEl;
   let toolEl; // tool root — target of the real (browser) fullscreen (item 5)
@@ -68,6 +76,8 @@
   let captures = $state([]);
   let capturesFor = $state(null);
   let capturesCollapsed = $state(false);
+  let capturesSubCollapsed = $state(false);
+  let focusedCapturePath = $state(null);
   let mapReady = $state(false);
 
   // OSM labels overlay: a transparent labels-only layer laid over the imagery so
@@ -98,7 +108,7 @@
   // of several passes, which is not a thing you can point at and date.)
   let s2Date = $state(''); // '' = the layer's default, i.e. the most recent pass
   let s2MenuOpen = $state(false);
-  let s2MenuEl; // bound to the popover wrapper — outside-click detection
+  let s2MenuEl = $state(); // bound to the popover wrapper — outside-click detection
   let s2Layers = $state([]); // [{id,label,hint}] — catalogue until the instance is asked
   let s2LayersSource = $state('');
   let s2LayersAsked = false; // the instance is asked once per session, on first open
@@ -110,6 +120,8 @@
   let s2PassesFor = $state(''); // the month+place s2Passes describes
   let s2PassesBusy = $state(false);
   let s2PassesNote = $state('');
+  let s2VerifyingDate = $state('');
+  let s2CoverageRev = $state(0);
   // The newest pass over this point — what "most recent" is actually showing.
   // The layer's default window renders the latest acquisition, so naming it is
   // the difference between a dated image and an undated one.
@@ -361,7 +373,7 @@
     document.addEventListener('fullscreenchange', onFullscreenChange);
     // the user clicked the extension after a refused capture — close the loop
     const offActivated = onActivated(() =>
-      toast('Extension ready — press Capture again', 'ok', 5000)
+      toast('Extension ready. Press Capture again', 'ok', 5000)
     );
     mapReady = true;
     return () => {
@@ -471,29 +483,47 @@
   // month already seen is free; the key is the map centre rounded to ~100 m,
   // because a nudge of the map is not a new question.
   const s2PassCache = new Map();
-  const s2PlaceKey = () => `${center.lat.toFixed(3)},${center.lon.toFixed(3)}`;
+  const s2PassPending = new Map();
+  const s2CoverageCache = new Map();
+  const s2PlaceKey = () => sentinelPlaceKey(center.lat, center.lon);
+  const s2CoverageKey = (day, place = s2PlaceKey(), layer = s2Layer) =>
+    `${layer}@${day}@${place}`;
+  let s2PassRequestId = 0;
+  let s2PickRequestId = 0;
 
   /**
    * One month's passes over one place: `{ 'YYYY-MM-DD': {cloud, granules} }`,
    * or null when the lookup failed. Cached — paging back to a month already
    * seen must not spend a second request.
    */
-  async function fetchS2Month(month, place, force = false) {
+  async function fetchS2Month(
+    month, place, force = false, lat = center.lat, lon = center.lon
+  ) {
     const key = `${month}@${place}`;
     if (!force && s2PassCache.has(key)) return s2PassCache.get(key);
+    if (!force && s2PassPending.has(key)) return s2PassPending.get(key);
+    if (force) s2PassCache.delete(key);
     const { from, to } = monthBounds(month);
-    try {
-      const r = await api.get(
-        `/api/satellite/sentinel/dates?lat=${center.lat}&lon=${center.lon}` +
+    const request = (async () => {
+      try {
+        const r = await api.get(
+          `/api/satellite/sentinel/dates?lat=${lat}&lon=${lon}` +
           `&start=${from}&end=${to}`
-      );
-      const byDay = {};
-      for (const d of r.dates) byDay[d.date] = { cloud: d.cloud, granules: d.granules };
-      s2PassCache.set(key, byDay);
-      refreshUsage(); // the lookup is billed: keep the pill honest
-      return byDay;
-    } catch {
-      return null;
+        );
+        const byDay = {};
+        for (const d of r.dates) byDay[d.date] = { cloud: d.cloud, granules: d.granules };
+        s2PassCache.set(key, byDay);
+        refreshUsage(); // the lookup is billed: keep the pill honest
+        return byDay;
+      } catch {
+        return null;
+      }
+    })();
+    s2PassPending.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (s2PassPending.get(key) === request) s2PassPending.delete(key);
     }
   }
 
@@ -505,12 +535,15 @@
    * processing units), only while the picker is open.
    */
   async function loadS2Passes(force = false) {
-    if (s2PassesBusy) return;
+    const requestId = ++s2PassRequestId;
+    const lat = center.lat;
+    const lon = center.lon;
     const place = s2PlaceKey();
     const key = `${s2Month}@${place}`;
     s2PassesBusy = true;
     s2PassesNote = '';
-    const days = await fetchS2Month(s2Month, place, force);
+    const days = await fetchS2Month(s2Month, place, force, lat, lon);
+    if (requestId !== s2PassRequestId) return;
     if (days) {
       s2Passes = days;
       s2PassesFor = key;
@@ -521,7 +554,7 @@
       // what exists.
       s2Passes = {};
       s2PassesFor = '';
-      s2PassesNote = 'Could not read this month’s passes — the days below are not a coverage answer.';
+      s2PassesNote = 'Could not read this month’s passes. The days below do not confirm coverage.';
     }
     s2PassesBusy = false;
   }
@@ -558,9 +591,60 @@
     s2LatestFor = place;
   }
 
-  function pickS2Date(day) {
-    if (!s2Passes[day]) return; // no pass, nothing to render — the cell is dead
-    s2Date = day === s2Date ? '' : day; // clicking the pinned day unpins it
+  function clearS2Date() {
+    s2PickRequestId += 1;
+    s2VerifyingDate = '';
+    s2Date = '';
+  }
+
+  function s2DateStatus(day) {
+    s2CoverageRev;
+    return s2CoverageCache.get(s2CoverageKey(day));
+  }
+
+  async function pickS2Date(day) {
+    if (day === s2Date) {
+      clearS2Date();
+      return;
+    }
+    if (!s2Passes[day] || s2PassesStale || s2PassesBusy || s2VerifyingDate) return;
+
+    const lat = center.lat;
+    const lon = center.lon;
+    const place = s2PlaceKey();
+    const layer = s2Layer;
+    const key = s2CoverageKey(day, place, layer);
+    const known = s2CoverageCache.get(key);
+    if (known === true) {
+      s2Date = day;
+      return;
+    }
+    if (known === false) {
+      toast(`No imagery at the crosshair on ${day}.`, 'warn');
+      return;
+    }
+
+    const requestId = ++s2PickRequestId;
+    s2VerifyingDate = day;
+    try {
+      const result = await api.get(coverageRequestPath({ lat, lon, layer, date: day }));
+      s2CoverageCache.set(key, result.available === true);
+      s2CoverageRev += 1;
+      refreshUsage();
+      if (requestId !== s2PickRequestId) return;
+      if (place !== s2PlaceKey() || layer !== s2Layer) {
+        toast('The map moved. Pick the date again.', 'warn');
+        return;
+      }
+      s2Date = dateAfterCoverage(s2Date, day, result.available);
+      if (!result.available) toast(`No imagery at the crosshair on ${day}.`, 'warn');
+    } catch (e) {
+      if (requestId === s2PickRequestId) {
+        toast(`Could not check imagery for ${day}: ${e.message}`, 'danger');
+      }
+    } finally {
+      if (requestId === s2PickRequestId) s2VerifyingDate = '';
+    }
   }
 
   // The passes on screen describe the place they were fetched for; once the map
@@ -568,6 +652,18 @@
   const s2PassesStale = $derived(
     !!s2PassesFor && s2PassesFor !== `${s2Month}@${s2PlaceKey()}`
   );
+
+  // While the picker is open, a settled pan refreshes its dates. The stale
+  // cells are disabled immediately; the debounce avoids a request per frame.
+  $effect(() => {
+    if (!s2MenuOpen || !isSentinel) return;
+    s2Month;
+    s2PlaceKey();
+    clearTimeout(s2PassTimer);
+    s2PassTimer = setTimeout(() => loadS2Passes(), 600);
+    return () => clearTimeout(s2PassTimer);
+  });
+  let s2PassTimer;
 
   // Naming the date of what's on screen is why you'd pick this basemap, so the
   // latest pass is resolved as soon as Sentinel-2 is actually being displayed —
@@ -685,7 +781,7 @@
         // toolbar stay visible — so degrading into it silently reads as a
         // broken fullscreen button rather than a refusal. Name the reason.
         toast(
-          `Real fullscreen refused (${e.name}: ${e.message}) — filling the window instead`,
+          `Real fullscreen refused (${e.name}: ${e.message}). Filling the window instead`,
           'warn',
           8000
         );
@@ -850,7 +946,7 @@
               detail: 'Google rejected the Maps JavaScript key (gm_authFailure)',
             });
           } catch { /* the toast still tells the user */ }
-          toast('Google rejected the Maps JavaScript key — basemap disabled (see Settings)', 'danger', 8000);
+          toast('Google rejected the Maps JavaScript key. Basemap disabled; see Settings', 'danger', 8000);
           providers = await api.get('/api/satellite/providers');
         },
       });
@@ -967,6 +1063,16 @@
     api.get(`/api/cases/${id}/satellite`).then((r) => (captures = r));
   });
 
+  $effect(() => {
+    const path = uiState.focusCapture;
+    if (!path || !captures.some((capture) => capture.path === path)) return;
+    uiState.focusCapture = null;
+    capturesCollapsed = false;
+    capturesSubCollapsed = false;
+    focusedCapturePath = path;
+    requestAnimationFrame(() => document.querySelector(`[data-capture-path="${CSS.escape(path)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+  });
+
   // the map container resizes when the sidebar toggles or is dragged wider, and
   // reappears from display:none when the tool tab is re-selected (tools stay
   // mounted) — all need Leaflet to re-measure and redraw tiles for the exposed area
@@ -982,7 +1088,11 @@
   $effect(() => {
     const target = uiState.gotoCoords;
     if (mapReady && target && Number.isFinite(target.lat) && Number.isFinite(target.lon)) {
+      if (target.provider && !providers.length) return;
       uiState.gotoCoords = null;
+      if (target.provider && providers.some((provider) => provider.id === target.provider)) {
+        providerId = target.provider;
+      }
       const zoom = Number.isFinite(target.zoom) ? target.zoom : Math.max(map.getZoom(), 16);
       map.setView([target.lat, target.lon], zoom);
       setBearing(Number.isFinite(target.bearing) ? target.bearing : 0);
@@ -1068,7 +1178,7 @@
   // resolution settings.
   let captureMode = $state('center'); // 'center' | 'select'
   let sizeMenuOpen = $state(false); // the mode/size/ratio/resolution popover
-  let sizeMenuEl; // bound to the popover's wrapper — used to detect outside clicks
+  let sizeMenuEl = $state(); // bound to the popover's wrapper — used to detect outside clicks
   let selectArmed = $state(false); // marquee mode: drag a box on the map to capture
   let selRect = $state(null); // live marquee { x0, y0, x1, y1 } in map-container px
 
@@ -1191,9 +1301,9 @@
       await reloadCase();
       toast(
         result.tiles_missing
-          ? `Captured with ${result.tiles_missing} missing tile(s) — no imagery there`
+          ? `Captured with ${result.tiles_missing} missing tile(s). No imagery was available there`
           : result.tiles_upscaled
-            ? `Captured — ${result.tiles_upscaled} tile(s) upscaled from a lower zoom (recorded in provenance)`
+            ? `Captured. ${result.tiles_upscaled} tile(s) were upscaled from a lower zoom and recorded in provenance`
             : 'Satellite crop captured & filed',
         result.tiles_missing || result.tiles_upscaled ? 'warn' : 'ok'
       );
@@ -1256,7 +1366,7 @@
       img.src = dataUrl;
     });
     if (!isRegistered(img.naturalWidth, img.naturalHeight, window.innerWidth, window.innerHeight)) {
-      throw new Error('the captured frame does not match this view — try again');
+      throw new Error('the captured frame does not match this view. Try again');
     }
     return img;
   }
@@ -1273,7 +1383,7 @@
       videoHeight: img.naturalHeight,
     });
     if (!src) {
-      throw new Error('the frame runs past the captured area — resize the window or pick a smaller size');
+      throw new Error('the frame runs past the captured area. Resize the window or pick a smaller size');
     }
     const { sx, sy, sw, sh } = src;
     const canvas = document.createElement('canvas');
@@ -1294,7 +1404,7 @@
     const mapRect = mapEl.getBoundingClientRect();
     if (!frameFitsView(rect, mapRect)) {
       toast(
-        `The ${Math.round(rect.w)}×${Math.round(rect.h)} frame is bigger than the map view — screen pixels are the ceiling here. Pick a smaller size or enlarge the window`,
+        `The ${Math.round(rect.w)}×${Math.round(rect.h)} frame is bigger than the map view. Pick a smaller size or enlarge the window`,
         'warn', 7000
       );
       return;
@@ -1412,7 +1522,7 @@
       if (blob) shotTake(new File([blob], 'screenshot.png', { type: 'image/png' }));
     } catch (e) {
       // extension missing or refused — the paste path still works
-      toast(`Screen capture unavailable (${e.message}) — paste a screenshot instead`, 'warn', 6000);
+      toast(`Screen capture unavailable (${e.message}). Paste a screenshot instead`, 'warn', 6000);
     } finally {
       shotGrabbing = false;
     }
@@ -1715,7 +1825,7 @@
     dragBounds = null;
     const resized = gridSearch.resizeRect(grid, b);
     if (gridSearch.estimateCells(resized) > GRID_MAX_CELLS) {
-      toast(`That area is too fine for ${grid.cell_m} m cells — keeping the previous size`, 'warn', 5000);
+      toast(`That area is too fine for ${grid.cell_m} m cells. Keeping the previous size`, 'warn', 5000);
       renderAoi(); // snap the handles back
       return;
     }
@@ -1752,7 +1862,7 @@
     liveVerts = null;
     const resized = gridSearch.resizePolygon(grid, verts);
     if (gridSearch.estimateCells(resized) > GRID_MAX_CELLS) {
-      toast(`That shape is too fine for ${grid.cell_m} m cells — keeping the previous one`, 'warn', 5000);
+      toast(`That shape is too fine for ${grid.cell_m} m cells. Keeping the previous one`, 'warn', 5000);
       renderAoi();
       return;
     }
@@ -1883,7 +1993,7 @@
     const cellM = Math.max(10, Number(gridCellM) || 500); // never a NaN lattice
     const g = gridSearch.createGrid(aoi, cellM);
     if (gridSearch.estimateCells(g) > GRID_MAX_CELLS) {
-      toast(`That area is too fine — over the ${GRID_MAX_CELLS}-cell limit. Use a larger cell size.`, 'warn', 6000);
+      toast(`That area exceeds the ${GRID_MAX_CELLS}-cell limit. Use a larger cell size.`, 'warn', 6000);
       renderGrid(); // restore the previous grid we hid to draw
       return;
     }
@@ -1923,7 +2033,7 @@
     editArea = false;
     const cell = gridSearch.nextUnchecked(grid, null);
     if (!cell) {
-      toast('Every cell is marked — sweep complete', 'ok');
+      toast('Every cell is marked. Sweep complete', 'ok');
       return;
     }
     flyToCell(cell);
@@ -2188,10 +2298,22 @@
     map?.invalidateSize();
   }
 
-  // saved places (navigable points) live on the case as `place` entities
-  const places = $derived(
-    (caseState.current?.entities ?? []).filter((e) => e.type === 'place')
-  );
+  // saved places (navigable points) live on the case as `place` entities, read
+  // a page at a time off the bounded catalog rather than the case-open payload.
+  let places = $state([]);
+  $effect(() => {
+    const id = caseState.current?.id;
+    caseState.rev; // re-read after a place is added/removed here or elsewhere
+    if (!id) {
+      places = [];
+      return;
+    }
+    let live = true;
+    fetchAllEntities(id, { types: ['place'] })
+      .then((list) => { if (live) places = list; })
+      .catch(() => { if (live) places = []; });
+    return () => { live = false; };
+  });
 
   function flyToPlace(p) {
     const lat = Number(p.attrs?.lat);
@@ -2208,7 +2330,6 @@
 
   // collapse state for the two saved-work sections
   let placesCollapsed = $state(false);
-  let capturesSubCollapsed = $state(false);
 
   // --- place edit modal (title + notes), used for both save & later edits ---
   // { id: string|null, title, notes, lat, lon, zoom, bearing }; id null = new
@@ -2302,7 +2423,7 @@
 
   <div class="body">
     <div
-      class="map-wrap"
+      class="map-wrap dark-surface"
       class:measuring={measureMode}
       class:selecting={selectArmed}
       class:grid-drawing={!!gridDraw}
@@ -2312,255 +2433,54 @@
 
       <!-- top-left control cluster: fullscreen, OSM labels overlay, measure tools -->
       <div class="map-tools">
-        <div class="tool-cluster card">
-          <button
-            class="mtbtn"
-            class:on={fullscreen}
-            onclick={toggleFullscreen}
-            title={fullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen map'}
-            aria-label="Toggle fullscreen"
-          >
-            <Icon name={fullscreen ? 'minimize' : 'maximize'} size={16} />
-          </button>
-          <button
-            class="mtbtn"
-            class:on={osmOverlay}
-            onclick={() => (osmOverlay = !osmOverlay)}
-            disabled={!baseIsImagery}
-            title={baseIsImagery
-              ? 'Overlay OSM labels (roads, place names) on the imagery'
-              : 'Labels overlay is only useful over satellite imagery'}
-            aria-label="Toggle OSM labels overlay"
-          >
-            <Icon name="layers" size={16} />
-          </button>
-          <button
-            class="mtbtn"
-            class:on={toolsOpen || measureMode}
-            onclick={toggleTools}
-            title="Measure tools"
-            aria-label="Measure tools"
-          >
-            <Icon name="ruler" size={16} />
-          </button>
-          <button
-            class="mtbtn"
-            class:on={gridMode}
-            onclick={toggleGridMode}
-            title="Grid Search — sweep an area cell by cell"
-            aria-label="Grid Search"
-          >
-            <Icon name="grid" size={16} />
-          </button>
-          <button
-            class="mtbtn"
-            class:on={uiState.refViewers.length}
-            onclick={openRefPicker}
-            title="Add a reference image or video over the map"
-            aria-label="Add reference"
-          >
-            <Icon name="image" size={16} />
-          </button>
-        </div>
-
-        {#if toolsOpen}
-          <div class="measure-panel card">
-            <div class="measure-btns">
-              <button
-                class="btn btn-sm"
-                class:on={measureMode === 'distance'}
-                onclick={() => setMeasureMode('distance')}
-              >
-                <Icon name="ruler" size={14} /> Distance
-              </button>
-              <button
-                class="btn btn-sm"
-                class:on={measureMode === 'area'}
-                onclick={() => setMeasureMode('area')}
-              >
-                <Icon name="polygon" size={14} /> Area
-              </button>
-              <button
-                class="btn btn-sm"
-                class:on={measureMode === 'angle'}
-                onclick={() => setMeasureMode('angle')}
-              >
-                <Icon name="angle" size={14} /> Angle
-              </button>
-            </div>
-            {#if measureMode}
-              <div class="measure-readout">
-                {#if measureReadout}
-                  <span class="measure-value mono">{measureReadout}</span>
-                {:else}
-                  <span class="measure-hint">{MEASURE_HINT[measureMode]}</span>
-                {/if}
-                <button class="btn btn-ghost btn-sm" onclick={clearMeasure} title="Clear points">
-                  <Icon name="reset" size={13} />
-                </button>
-              </div>
-            {/if}
-          </div>
-        {/if}
+        <MapToolCluster
+          {fullscreen}
+          {toggleFullscreen}
+          bind:osmOverlay
+          {baseIsImagery}
+          {toolsOpen}
+          {measureMode}
+          {toggleTools}
+          {gridMode}
+          {toggleGridMode}
+          referenceCount={uiState.refViewers.length}
+          {openRefPicker}
+          {setMeasureMode}
+          {measureReadout}
+          measureHint={MEASURE_HINT}
+          {clearMeasure}
+        />
 
         {#if gridMode}
-          <div class="grid-panel card" class:collapsed={gridCollapsed}>
-            <div class="grid-head">
-              <button
-                class="grid-collapse"
-                onclick={() => (gridCollapsed = !gridCollapsed)}
-                title={gridCollapsed ? 'Expand' : 'Collapse'}
-                aria-label={gridCollapsed ? 'Expand panel' : 'Collapse panel'}
-              >
-                <Icon name={gridCollapsed ? 'chevronDown' : 'chevronUp'} size={14} />
-              </button>
-              {#if renamingGrid}
-                <!-- svelte-ignore a11y_autofocus -->
-                <input
-                  class="input grid-rename"
-                  bind:value={renameText}
-                  autofocus
-                  onblur={commitRename}
-                  onkeydown={(e) => {
-                    if (e.key === 'Enter') commitRename();
-                    else if (e.key === 'Escape') {
-                      renameText = grid.title || '';
-                      renamingGrid = false;
-                    }
-                  }}
-                />
-              {:else}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <span
-                  class="grid-head-title"
-                  class:renamable={grid}
-                  ondblclick={startRename}
-                  title={grid ? 'Double-click to rename' : ''}
-                >
-                  {grid ? grid.title || 'Grid' : 'Grid Search'}
-                </span>
-              {/if}
-              {#if grid}
-                <button
-                  class="grid-eye"
-                  onclick={toggleGridHidden}
-                  title={gridHidden ? 'Show grid' : 'Hide grid'}
-                  aria-label={gridHidden ? 'Show grid' : 'Hide grid'}
-                >
-                  <Icon name={gridHidden ? 'eyeOff' : 'eye'} size={14} />
-                </button>
-                {#if gridCov}
-                  <span class="grid-head-pct mono">{gridCov.percent}%</span>
-                {/if}
-              {/if}
-            </div>
-
-            {#if !gridCollapsed}
-              <div class="grid-body">
-                {#if grid}
-                  <div class="grid-cov">
-                    <div class="grid-bar">
-                      <span class="grid-bar-fill" style="width:{gridCov.percent}%"></span>
-                    </div>
-                    <span class="grid-cov-text mono">
-                      {gridCov.cleared + gridCov.flagged}/{gridCov.total} · {gridCov.percent}%{#if gridCov.flagged} · {gridCov.flagged} flagged{/if}
-                    </span>
-                  </div>
-
-                  {#if reviewKey}
-                    <div class="grid-hint">
-                      <b>C</b> clear · <b>F</b> flag · <b>S</b> skip · <b>P</b> place · <b>Esc</b> stop
-                    </div>
-                    <div class="grid-btns">
-                      <button class="btn btn-sm" onclick={() => markReview('cleared')}>
-                        <Icon name="check" size={13} /> Clear
-                      </button>
-                      <button class="btn btn-sm" onclick={() => markReview('flagged')}>
-                        <Icon name="pin" size={13} /> Flag
-                      </button>
-                      <button class="btn btn-sm" onclick={reviewToPlace} title="Flag and save as a place">
-                        <Icon name="plus" size={13} /> Place
-                      </button>
-                      <button class="btn btn-ghost btn-sm" onclick={stopReview}>Stop</button>
-                    </div>
-                  {:else}
-                    <div class="grid-btns">
-                      <button class="btn btn-sm" onclick={startReview} title="Fly through the unchecked cells">
-                        <Icon name="eye" size={13} /> Review
-                      </button>
-                      <button class="btn btn-sm" class:on={editArea} onclick={toggleEditArea} title="Show the area box to resize or reshape it">
-                        <Icon name="edit" size={13} /> Edit area
-                      </button>
-                      <button class="btn btn-sm grid-discard" onclick={discardOpenGrid} title="Close this grid (it stays saved) to draw or open another">
-                        Discard
-                      </button>
-                      <button class="btn btn-ghost btn-sm" onclick={() => deleteGrid(gridName)} title="Delete this grid for good">
-                        <Icon name="trash" size={13} />
-                      </button>
-                    </div>
-                    {#if editArea}
-                      <div class="grid-hint">Drag the {grid.aoi.type === 'rect' ? 'corners' : 'points'} to reshape.</div>
-                    {/if}
-                  {/if}
-                {/if}
-
-                {#if !grid}
-                  <div class="grid-new">
-                    <div class="grid-size">
-                      <span>Cell</span>
-                      <input
-                        class="input"
-                        type="number"
-                        min="10"
-                        step="10"
-                        bind:value={gridCellM}
-                        title="Cell size in metres for the next grid"
-                      />
-                      <span>m</span>
-                    </div>
-                    <div class="grid-btns">
-                      <button class="btn btn-sm" class:on={gridDraw === 'rect'} onclick={() => startDraw('rect')}>
-                        <Icon name="square" size={13} /> Box
-                      </button>
-                      <button class="btn btn-sm" class:on={gridDraw === 'polygon'} onclick={() => startDraw('polygon')}>
-                        <Icon name="polygon" size={13} /> Polygon
-                      </button>
-                    </div>
-                    {#if gridDraw === 'polygon'}
-                      <div class="grid-hint">Click to add points{#if polyDraft.length} · {polyDraft.length}{/if}. Drag to adjust.</div>
-                      <div class="grid-btns">
-                        <button class="btn btn-sm" disabled={polyDraft.length < 3} onclick={confirmPolygon}>Confirm</button>
-                        <button class="btn btn-ghost btn-sm" onclick={cancelGridDraw}>Cancel</button>
-                      </div>
-                    {:else if gridDraw === 'rect'}
-                      <div class="grid-hint">Drag a box on the map. Esc to cancel.</div>
-                    {/if}
-                  </div>
-                {/if}
-
-                {#if !grid && savedOthers.length}
-                  <div class="grid-saved">
-                    <div class="grid-saved-label">Saved grids ({savedOthers.length})</div>
-                    <div class="grid-saved-list">
-                      {#each savedOthers as g (g.name)}
-                        <div class="grid-saved-row">
-                          <button class="grid-load" onclick={() => loadGrid(g.name)} title="Open this grid">
-                            {g.title || g.name}
-                          </button>
-                          <span class="grid-saved-cov mono" title="cleared · flagged">
-                            {g.cleared}{#if g.flagged}<span class="flagged"> ⚑{g.flagged}</span>{/if}
-                          </span>
-                          <button class="btn btn-ghost btn-sm" onclick={() => deleteGrid(g.name)} title="Delete">
-                            <Icon name="trash" size={12} />
-                          </button>
-                        </div>
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
+          <GridSearchPanel
+            bind:collapsed={gridCollapsed}
+            bind:renaming={renamingGrid}
+            bind:renameText
+            {commitRename}
+            {startRename}
+            {grid}
+            toggleHidden={toggleGridHidden}
+            hidden={gridHidden}
+            coverage={gridCov}
+            {reviewKey}
+            {markReview}
+            {reviewToPlace}
+            {stopReview}
+            {startReview}
+            {editArea}
+            {toggleEditArea}
+            discard={discardOpenGrid}
+            {deleteGrid}
+            {gridName}
+            bind:cellMetres={gridCellM}
+            drawMode={gridDraw}
+            {startDraw}
+            polygonDraft={polyDraft}
+            {confirmPolygon}
+            cancelDraw={cancelGridDraw}
+            savedGrids={savedOthers}
+            {loadGrid}
+          />
         {/if}
       </div>
 
@@ -2648,8 +2568,8 @@
           title={s2PinnedDate
             ? `Sentinel-2 ${s2LayerLabel} from this exact date`
             : s2Latest
-              ? `Sentinel-2 ${s2LayerLabel} — most recent pass over this point`
-              : `Sentinel-2 ${s2LayerLabel} — most recent pass (open the picker to date it)`}
+              ? `Sentinel-2 ${s2LayerLabel}: most recent pass over this point`
+              : `Sentinel-2 ${s2LayerLabel}: most recent pass (open the picker to date it)`}
         >
           <Icon name="clock" size={11} />
           {s2PinnedDate ?? s2Latest ?? ''}
@@ -2719,105 +2639,32 @@
           {/each}
         </select>
         {#if isSentinel}
-          <div class="s2-wrap" bind:this={s2MenuEl}>
-            <!-- icon-only: the bar is shared with the capture controls and has a
-                 finite width — the chosen layer and date read from the pill in
-                 the map's corner, where they don't cost the bar a row -->
-            <button
-              class="btn btn-icon"
-              class:on={s2MenuOpen}
-              onclick={toggleS2Menu}
-              title="Sentinel-2 — layer & date"
-              aria-label="Sentinel-2 layer and date"
-            >
-              <Icon name="layers" size={14} />
-            </button>
-            {#if s2MenuOpen}
-              <div class="s2-menu card">
-                <div class="menu-row">
-                  <span class="menu-label">Layer</span>
-                  <select class="select" bind:value={s2Layer}>
-                    {#each s2Layers as l (l.id)}
-                      <option value={l.id}>{l.label}</option>
-                    {/each}
-                  </select>
-                </div>
-                {#if s2LayerHint}
-                  <div class="menu-hint">{s2LayerHint}</div>
-                {/if}
-                <div class="menu-hint dim">
-                  {s2LayersSource === 'instance'
-                    ? 'Read from your configuration — these are the layers it serves.'
-                    : 'Could not read your configuration; showing the standard layers.'}
-                  <button class="linkish" onclick={() => loadS2Layers(true)}>Refresh</button>
-                </div>
-
-                <div class="menu-sep" aria-hidden="true"></div>
-
-                <div class="menu-row">
-                  <span class="menu-label">Date</span>
-                  <div class="chips">
-                    <button class="chip" class:on={!s2Date} onclick={() => (s2Date = '')}>
-                      Most recent
-                    </button>
-                  </div>
-                </div>
-
-                <div class="cal">
-                  <div class="cal-head">
-                    <button class="cal-nav" onclick={() => stepS2Month(-1)} aria-label="Previous month">
-                      <Icon name="chevronLeft" size={13} />
-                    </button>
-                    <span class="cal-month">{monthLabel(s2Month)}</span>
-                    <button class="cal-nav" onclick={() => stepS2Month(1)} aria-label="Next month">
-                      <Icon name="chevronRight" size={13} />
-                    </button>
-                  </div>
-                  <div class="cal-grid" class:busy={s2PassesBusy}>
-                    {#each ['M', 'T', 'W', 'T', 'F', 'S', 'S'] as d, i (i)}
-                      <span class="cal-dow" aria-hidden="true">{d}</span>
-                    {/each}
-                    {#each monthGrid(s2Month) as day, i (day ?? `pad${i}`)}
-                      {#if !day}
-                        <span class="cal-pad" aria-hidden="true"></span>
-                      {:else}
-                        {@const pass = s2Passes[day]}
-                        <button
-                          class="cal-day {pass ? cloudClass(pass.cloud) : ''}"
-                          class:has={!!pass}
-                          class:on={s2Date === day}
-                          disabled={!pass}
-                          onclick={() => pickS2Date(day)}
-                          title={pass
-                            ? `${day} — ${cloudLabel(pass.cloud) || 'cloud cover unknown'}`
-                            : `${day} — no Sentinel-2 pass`}
-                        >
-                          {Number(day.slice(8))}
-                        </button>
-                      {/if}
-                    {/each}
-                  </div>
-                </div>
-
-                {#if s2PassesBusy}
-                  <div class="menu-hint dim">Reading this month's passes…</div>
-                {:else if s2PassesNote}
-                  <div class="menu-hint warn">{s2PassesNote}</div>
-                {:else if s2PassesStale}
-                  <div class="menu-hint">
-                    <span class="warn">The map moved — these passes are for where you were.</span>
-                    <button class="linkish" onclick={() => loadS2Passes(true)}>Refresh</button>
-                  </div>
-                {:else}
-                  <div class="menu-hint dim">
-                    Only days Sentinel-2 passed over this point are selectable; the colour is
-                    cloud cover. A pinned day shows that pass alone — near a swath edge it can
-                    still be black (no data), so try the neighbouring date.
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          </div>
+          <SentinelPicker
+            bind:menuEl={s2MenuEl}
+            menuOpen={s2MenuOpen}
+            toggleMenu={toggleS2Menu}
+            bind:layer={s2Layer}
+            layers={s2Layers}
+            layerHint={s2LayerHint}
+            layersSource={s2LayersSource}
+            loadLayers={loadS2Layers}
+            bind:date={s2Date}
+            month={s2Month}
+            {monthLabel}
+            stepMonth={stepS2Month}
+            {monthGrid}
+            passes={s2Passes}
+            {cloudClass}
+            {cloudLabel}
+            passesBusy={s2PassesBusy}
+            passesNote={s2PassesNote}
+            passesStale={s2PassesStale}
+            verifyingDate={s2VerifyingDate}
+            dateStatus={s2DateStatus}
+            pickDate={pickS2Date}
+            clearDate={clearS2Date}
+            loadPasses={loadS2Passes}
+          />
         {/if}
         {#if usagePill}
           <span
@@ -2830,11 +2677,11 @@
             class="fallback-pill"
             class:paused={meterBlocked}
             title={meterBlocked
-              ? `${currentProvider.label} passed 90% of its monthly free tier — showing free imagery instead. Override in Settings to keep using it (billed).`
-              : `Eco mode: free imagery at low zoom — zoom in to get ${currentProvider.label} detail. Toggle in Settings.`}
+              ? `${currentProvider.label} passed 90% of its monthly free tier. Free imagery is shown instead. Override in Settings to keep using it (billed).`
+              : `Eco mode shows free imagery at low zoom. Zoom in for ${currentProvider.label} detail. Toggle in Settings.`}
           >
             <Icon name={meterBlocked ? 'alert' : 'leaf'} size={11} />
-            {meterBlocked ? `${currentProvider.label} paused — free imagery` : 'eco — free imagery'}
+            {meterBlocked ? `${currentProvider.label} paused · free imagery` : 'eco · free imagery'}
           </span>
         {/if}
         <select class="select" bind:value={markerStyle} title="Marker style">
@@ -2876,165 +2723,26 @@
              mode + size/ratio/resolution settings. Hovering/focusing the main
              button previews the centred crop frame, only while that's the
              active mode. -->
-        <div class="capture-split" role="group">
-          <button
-            class="btn btn-primary capture-main"
-            class:on={captureMode === 'select' && selectArmed}
-            onmouseenter={() => (captureHover = captureMode === 'center')}
-            onmouseleave={() => (captureHover = false)}
-            onfocusin={() => (captureHover = captureMode === 'center')}
-            onfocusout={() => (captureHover = false)}
-            onclick={runCapture}
-            disabled={capturing || captureBlocked}
-            title={captureBlocked
-              ? 'View-only basemap — this provider cannot be captured'
-              : captureMode === 'select'
-                ? `Draw a rectangle on the map to capture exactly that area${isWidgetBase ? ' (grabbed from the screen)' : ''}`
-                : `Capture the centred preset size${isWidgetBase ? ' (grabbed from the screen)' : ''}`}
-          >
-            {#if capturing}
-              <span class="spinner"></span> Capturing…
-            {:else if captureMode === 'select'}
-              <Icon name="crop" size={14} /> {selectArmed ? 'Draw box…' : 'Select area'}
-            {:else}
-              <Icon name="satellite" size={15} /> Capture
-            {/if}
-          </button>
-
-          <div class="size-menu-wrap" bind:this={sizeMenuEl}>
-            <button
-              class="btn btn-icon capture-arrow"
-              class:on={sizeMenuOpen}
-              onclick={() => (sizeMenuOpen = !sizeMenuOpen)}
-              title={isWidgetBase
-                ? 'Capture mode, size & ratio'
-                : 'Capture mode, size, ratio & resolution'}
-              aria-label="Capture options"
-            >
-              <Icon name="chevronDown" size={13} />
-            </button>
-            {#if sizeMenuOpen}
-              <div class="size-menu card">
-                <div class="menu-row">
-                  <span class="menu-label">Mode</span>
-                  <div class="chips">
-                    <button class="chip" class:on={captureMode === 'center'} onclick={() => (captureMode = 'center')}>
-                      Capture
-                    </button>
-                    <button class="chip" class:on={captureMode === 'select'} onclick={() => (captureMode = 'select')}>
-                      Select area
-                    </button>
-                  </div>
-                </div>
-                <div class="menu-hint">
-                  {captureMode === 'center'
-                    ? 'Captures the centred size below.'
-                    : 'Drag a box on the map to capture exactly it.'}
-                </div>
-
-                {#if captureMode === 'select'}
-                  <div class="menu-row">
-                    <span class="menu-label">Ratio</span>
-                    <div class="chips">
-                      {#each RATIOS as r (r.id)}
-                        <button class="chip" class:on={ratio === r.id} onclick={() => (ratio = r.id)}>
-                          {r.label}
-                        </button>
-                      {/each}
-                    </div>
-                  </div>
-                  <div class="menu-hint">Locks the dragged box's shape.</div>
-                {:else}
-                  <div class="menu-row">
-                    <span class="menu-label">Size</span>
-                    <div class="chips">
-                      {#each PRESETS as p (p.id)}
-                        <button class="chip" class:on={preset === p.id} onclick={() => (preset = p.id)}>
-                          {p.label}
-                        </button>
-                      {/each}
-                    </div>
-                  </div>
-                  {#if preset === 'custom'}
-                    <div class="custom-size" title="Custom crop size ({SIZE_MIN}–{SIZE_MAX} px)">
-                      <input
-                        class="input size-input"
-                        type="number"
-                        min={SIZE_MIN}
-                        max={SIZE_MAX}
-                        bind:value={customW}
-                        onblur={() => (customW = clampSize(customW))}
-                        aria-label="Crop width"
-                      />
-                      <span>×</span>
-                      <input
-                        class="input size-input"
-                        type="number"
-                        min={SIZE_MIN}
-                        max={SIZE_MAX}
-                        bind:value={customH}
-                        onblur={() => (customH = clampSize(customH))}
-                        aria-label="Crop height"
-                      />
-                    </div>
-                  {/if}
-                {/if}
-
-                <!-- the widget's one real difference: its pixels come off the
-                     screen, so there is no deeper zoom to capture and no
-                     resolution to choose -->
-                {#if isWidgetBase}
-                  <div class="menu-row">
-                    <span class="menu-label">Source</span>
-                    <div class="chips">
-                      {#if extensionVersion()}
-                        <button
-                          class="chip"
-                          onclick={() => {
-                            sizeMenuOpen = false;
-                            shotOpen = true;
-                          }}
-                        >
-                          Paste a screenshot…
-                        </button>
-                      {:else}
-                        <button
-                          class="chip"
-                          onclick={() => {
-                            sizeMenuOpen = false;
-                            extGateOpen = true;
-                          }}
-                        >
-                          Get the capture extension
-                        </button>
-                      {/if}
-                    </div>
-                  </div>
-                  <div class="menu-hint">
-                    {#if extensionVersion()}
-                      This basemap is captured from the screen (Google's terms allow nothing
-                      programmatic out of it), so the frame can't go past the map view and screen
-                      pixels are the ceiling.
-                    {:else}
-                      This basemap is captured from the screen, so filing it needs the capture
-                      extension (Google's terms allow nothing programmatic out).
-                    {/if}
-                  </div>
-                {:else}
-                  <div class="menu-row">
-                    <span class="menu-label">Resolution</span>
-                    <div class="chips">
-                      <button class="chip" class:on={resolution === 1} onclick={() => (resolution = 1)}>1×</button>
-                      <button class="chip" class:on={resolution === 2} onclick={() => (resolution = 2)}>2×</button>
-                      <button class="chip" class:on={resolution === 'max'} onclick={() => (resolution = 'max')}>Max</button>
-                    </div>
-                  </div>
-                  <div class="menu-hint">Captures a deeper zoom for a sharper file.</div>
-                {/if}
-              </div>
-            {/if}
-          </div>
-        </div>
+        <CaptureOptions
+          bind:menuEl={sizeMenuEl}
+          bind:menuOpen={sizeMenuOpen}
+          bind:mode={captureMode}
+          bind:hover={captureHover}
+          {selectArmed}
+          {capturing}
+          blocked={captureBlocked}
+          widgetBase={isWidgetBase}
+          {runCapture}
+          ratios={RATIOS}
+          bind:ratio
+          presets={PRESETS}
+          bind:preset
+          bind:customWidth={customW}
+          bind:customHeight={customH}
+          bind:resolution
+          openScreenshot={() => (shotOpen = true)}
+          openExtensionGate={() => (extGateOpen = true)}
+        />
       </div>
       <!-- floating reference-image windows (scratch aids over the map) -->
       {#each uiState.refViewers as v (v.id)}
@@ -3178,7 +2886,7 @@
             {:else}
               <div class="cap-list">
               {#each (caseState.current ? captures : []) as item (item.path)}
-                <div class="cap card">
+                <div class="cap card" class:focused={focusedCapturePath === item.path} data-capture-path={item.path}>
                   <a
                     class="cap-goto"
                     class:disabled={fullscreen}
@@ -3240,7 +2948,7 @@
                     <button
                       class="btn btn-ghost btn-sm"
                       disabled={fullscreen}
-                      title={leavesFullscreen ?? 'Send to Proof Composer'}
+                      title={leavesFullscreen ?? 'Send to Geo Proof'}
                       onclick={() => sendToComposer(item)}
                     >
                       <Icon name="proof" size={14} />
@@ -3286,8 +2994,8 @@
       ? `“${deleteTarget.item.title ?? coordsLabel(deleteTarget.item)}” will be removed from the case.`
       : `“${deleteTarget.item.label}” will be removed from the case.`}
     detail={deleteTarget.kind === 'capture'
-      ? 'This permanently deletes the image file on disk — it cannot be undone.'
-      : 'This permanently removes the saved point — it cannot be undone.'}
+      ? 'This permanently deletes the image file on disk. It cannot be undone.'
+      : 'This permanently removes the saved point. It cannot be undone.'}
     confirmLabel="Delete"
     tone="danger"
     busy={deleteBusy}
@@ -3299,8 +3007,9 @@
 <!-- satellite notes modal -->
 {#if notesItem}
   <Modal title="Capture details" onclose={() => (notesItem = null)} width="420px">
-    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
+    <label for="capture-title" style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
     <input
+      id="capture-title"
       class="input"
       placeholder={coordsLabel(notesItem)}
       bind:value={notesTitle}
@@ -3329,8 +3038,9 @@
       </div>
     </div>
     <hr style="border:none;border-top:1px solid var(--border);margin:12px 0" />
-    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Notes</label>
+    <label for="capture-notes" style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Notes</label>
     <textarea
+      id="capture-notes"
       class="textarea"
       rows="5"
       placeholder="Add observations, links, context…"
@@ -3355,7 +3065,7 @@
       grab the whole map view below, or paste
       (<span class="mono">Ctrl+V</span>) / drop your own OS screenshot.
       Unlike a framed capture, this is filed at the current <em>view</em>
-      (<span class="mono">{fmtCoords(center.lat, center.lon)}</span>, z{center.zoom}) —
+      (<span class="mono">{fmtCoords(center.lat, center.lon)}</span>, z{center.zoom}).
       the coordinates describe the map, not a registered crop. The Google attribution
       is burned into a footer either way; keep Google's on-screen credits inside the
       frame too.
@@ -3430,8 +3140,9 @@
     onclose={() => (placeModal = null)}
     width="420px"
   >
-    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
+    <label for="place-title" style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Title</label>
     <input
+      id="place-title"
       class="input"
       placeholder={placeCoordsLabel(placeModal)}
       bind:value={placeModal.title}
@@ -3448,8 +3159,9 @@
       </div>
     </div>
     <hr style="border:none;border-top:1px solid var(--border);margin:12px 0" />
-    <label style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Notes</label>
+    <label for="place-notes" style="display:block;font-size:var(--fs-xs);color:var(--text-3);margin-bottom:5px">Notes</label>
     <textarea
+      id="place-notes"
       class="textarea"
       rows="5"
       placeholder="Add observations, links, context…"
@@ -3476,7 +3188,7 @@
       <div class="ref-empty">Loading…</div>
     {:else if !refMedia.length}
       <div class="ref-empty">
-        No images or videos in this case yet — import one in the Media Library first.
+        No images or videos in this case yet. Import one in the Media Library first.
       </div>
     {:else}
       <div class="ref-grid">
@@ -3666,79 +3378,6 @@
     gap: 8px;
     align-items: flex-start;
   }
-  .tool-cluster {
-    display: flex;
-    gap: 2px;
-    padding: 4px;
-    background: rgba(24, 24, 24, 0.88);
-    backdrop-filter: blur(6px);
-  }
-  .mtbtn {
-    display: grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border-radius: var(--radius-1);
-    color: var(--text-2);
-    cursor: pointer;
-  }
-  .mtbtn:hover {
-    color: var(--text-1);
-    background: var(--bg-3);
-  }
-  .mtbtn.on {
-    color: var(--accent-text);
-    background: var(--accent);
-  }
-  .mtbtn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-  .mtbtn:disabled:hover {
-    color: var(--text-2);
-    background: none;
-  }
-  /* float to the right of the tool cluster instead of below it, where the
-     Leaflet zoom control sits — otherwise the two overlap (item 7) */
-  .measure-panel {
-    position: absolute;
-    top: 0;
-    left: calc(100% + 8px);
-    width: max-content;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px;
-    background: rgba(24, 24, 24, 0.92);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-2);
-  }
-  .measure-btns {
-    display: flex;
-    gap: 4px;
-  }
-  .measure-btns .btn.on {
-    background: var(--accent);
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-  .measure-readout {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding-top: 6px;
-    border-top: 1px solid var(--border);
-  }
-  .measure-value {
-    font-size: var(--fs-md);
-    font-weight: 700;
-    color: var(--accent);
-  }
-  .measure-hint {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-  }
   .map-wrap.measuring :global(.leaflet-container),
   .map-wrap.selecting :global(.leaflet-container) {
     cursor: crosshair;
@@ -3747,198 +3386,6 @@
     cursor: crosshair;
   }
 
-  /* Grid Search panel — same shelf as the measure panel, to the cluster's right */
-  .grid-panel {
-    position: absolute;
-    top: 0;
-    left: calc(100% + 8px);
-    width: 218px;
-    display: flex;
-    flex-direction: column;
-    background: rgba(24, 24, 24, 0.92);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-2);
-  }
-  .grid-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 8px;
-  }
-  .grid-collapse {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius-1);
-    color: var(--text-2);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .grid-collapse:hover {
-    color: var(--text-1);
-    background: var(--bg-3);
-  }
-  .grid-head-title {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--fs-sm);
-    font-weight: 600;
-    color: var(--text-1);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .grid-head-title.renamable {
-    cursor: text;
-  }
-  .grid-rename {
-    flex: 1;
-    min-width: 0;
-    height: 24px;
-    padding: 2px 6px;
-    font-size: var(--fs-sm);
-  }
-  .grid-eye {
-    display: grid;
-    place-items: center;
-    width: 22px;
-    height: 22px;
-    border-radius: var(--radius-1);
-    color: var(--text-2);
-    cursor: pointer;
-    flex-shrink: 0;
-  }
-  .grid-eye:hover {
-    color: var(--text-1);
-    background: var(--bg-3);
-  }
-  .grid-head-pct {
-    font-size: var(--fs-xs);
-    color: var(--accent);
-    flex-shrink: 0;
-  }
-  .grid-body {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 0 10px 10px;
-  }
-  .grid-size {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-  }
-  .grid-size .input {
-    width: 64px;
-  }
-  .grid-btns {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .grid-btns .btn.on {
-    background: var(--accent);
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-  .grid-discard {
-    background: rgba(255, 255, 255, 0.1);
-    border-color: rgba(255, 255, 255, 0.18);
-    color: var(--text-1);
-  }
-  .grid-discard:hover {
-    background: rgba(255, 255, 255, 0.16);
-    color: var(--text-1);
-  }
-  .grid-hint {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-  }
-  .grid-hint b {
-    color: var(--text-2);
-  }
-  .grid-cov {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-  .grid-bar {
-    height: 6px;
-    border-radius: 3px;
-    background: rgba(124, 138, 165, 0.25);
-    overflow: hidden;
-  }
-  .grid-bar-fill {
-    display: block;
-    height: 100%;
-    background: var(--accent);
-    transition: width 0.15s ease;
-  }
-  .grid-cov-text {
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-  }
-  .grid-new {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-  }
-  .grid-saved {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    padding-top: 8px;
-    border-top: 1px solid var(--border);
-  }
-  .grid-saved-label {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    margin-bottom: 2px;
-  }
-  .grid-saved-list {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    /* hundreds of grids scroll inside the panel instead of stretching it down
-       the whole page */
-    max-height: 240px;
-    overflow-y: auto;
-  }
-  .grid-saved-row {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .grid-load {
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-    padding: 3px 6px;
-    border-radius: var(--radius-1);
-    font-size: var(--fs-xs);
-    color: var(--text-2);
-    cursor: pointer;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .grid-load:hover {
-    color: var(--text-1);
-    background: var(--bg-3);
-  }
-  .grid-saved-cov {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    flex-shrink: 0;
-  }
-  .grid-saved-cov .flagged {
-    color: #ffcf33;
-  }
   /* draggable square handle for the area corners / polygon vertices */
   :global(.grid-handle) {
     background: var(--accent, #f5a623);
@@ -4100,255 +3547,6 @@
   .fallback-pill.paused {
     color: var(--danger);
   }
-  /* the capture split-button: main action + arrow fused into one pill,
-     mirroring .place-save's main/edit split */
-  .capture-split {
-    display: flex;
-    align-items: stretch;
-  }
-  .capture-main {
-    border-top-right-radius: 0;
-    border-bottom-right-radius: 0;
-  }
-  .capture-arrow {
-    border-top-left-radius: 0;
-    border-bottom-left-radius: 0;
-    background: var(--accent);
-    border-color: transparent;
-    border-left: 1px solid rgba(0, 0, 0, 0.2);
-    color: var(--accent-text);
-  }
-  .capture-arrow:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-  .size-menu-wrap .capture-arrow.on {
-    background: var(--accent-hover);
-  }
-  .capture-main.on {
-    box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.5);
-  }
-  .custom-size {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-  }
-  .size-input {
-    width: 64px;
-    padding: 5px 6px;
-    font-size: var(--fs-xs);
-    text-align: center;
-  }
-
-  /* square icon button (the size/ratio/resolution popover trigger) */
-  .btn-icon {
-    padding: 6px 8px;
-  }
-  .btn-icon.on {
-    background: var(--accent);
-    color: var(--accent-text);
-    border-color: var(--accent);
-  }
-  .size-menu-wrap {
-    position: relative;
-    display: flex;
-  }
-  .size-menu {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    right: 0;
-    width: max-content;
-    max-width: 280px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 12px;
-    background: rgba(24, 24, 24, 0.96);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-2);
-    z-index: 700;
-  }
-  .menu-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    justify-content: space-between;
-  }
-  .menu-label {
-    font-size: var(--fs-xs);
-    color: var(--text-3);
-    font-weight: 600;
-  }
-  .chips {
-    display: flex;
-    gap: 4px;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-  .chip {
-    padding: 4px 9px;
-    border-radius: var(--r-sm);
-    border: 1px solid var(--border);
-    background: var(--bg-2);
-    color: var(--text-2);
-    font-size: var(--fs-xs);
-    white-space: nowrap;
-    cursor: pointer;
-    transition: border-color 0.12s, color 0.12s, background 0.12s;
-  }
-  .chip:hover {
-    border-color: var(--border-strong);
-    color: var(--text-1);
-  }
-  .chip.on {
-    border-color: var(--accent);
-    background: var(--accent-soft);
-    color: var(--accent);
-  }
-  .menu-hint {
-    font-size: 10px;
-    color: var(--text-3);
-    margin: -1px 0 5px;
-  }
-  .menu-hint.dim {
-    opacity: 0.75;
-  }
-  .menu-hint .warn,
-  .menu-hint.warn {
-    color: var(--warn, #e2a03f);
-  }
-  .menu-sep {
-    height: 1px;
-    background: var(--border);
-    margin: 4px 0 6px;
-  }
-
-  /* --- Sentinel-2 layer + date popover --- */
-  .s2-wrap {
-    position: relative;
-    display: flex;
-  }
-  .s2-menu {
-    position: absolute;
-    bottom: calc(100% + 8px);
-    left: 0;
-    width: max-content;
-    max-width: 320px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 12px;
-    background: rgba(24, 24, 24, 0.96);
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-2);
-    z-index: 700;
-  }
-  .s2-menu .select {
-    max-width: 190px;
-  }
-  .linkish {
-    background: none;
-    border: 0;
-    padding: 0;
-    color: var(--accent);
-    font-size: 10px;
-    cursor: pointer;
-    text-decoration: underline;
-  }
-  /* --- the pass calendar --- */
-  .cal {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    margin: 2px 0 6px;
-  }
-  .cal-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-  }
-  .cal-month {
-    font-size: var(--fs-xs);
-    font-weight: 600;
-    color: var(--text-1);
-  }
-  .cal-nav {
-    display: flex;
-    padding: 3px 5px;
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    background: var(--bg-2);
-    color: var(--text-2);
-    cursor: pointer;
-  }
-  .cal-nav:hover {
-    color: var(--text-1);
-    border-color: var(--text-3);
-  }
-  .cal-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
-    gap: 2px;
-  }
-  .cal-grid.busy {
-    opacity: 0.5;
-    pointer-events: none;
-  }
-  .cal-dow {
-    text-align: center;
-    font-size: 9px;
-    color: var(--text-3);
-    padding-bottom: 2px;
-  }
-  .cal-day {
-    aspect-ratio: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: 1px solid transparent;
-    border-radius: var(--r-sm);
-    background: transparent;
-    color: var(--text-3);
-    font-size: 10px;
-    font-family: var(--font-mono);
-    cursor: pointer;
-  }
-  /* a day with no pass isn't dimmed decoration — there is nothing to render, so
-     it cannot be chosen (the same rule the Copernicus browser follows) */
-  .cal-day:disabled {
-    opacity: 0.28;
-    cursor: default;
-  }
-  .cal-day.has {
-    color: var(--text-1);
-    background: var(--bg-2);
-    border-color: var(--border);
-  }
-  /* cloud cover, at a glance: most passes are white and cost a tile to find out */
-  .cal-day.clear {
-    border-color: color-mix(in srgb, var(--ok, #46a758) 65%, transparent);
-    color: var(--ok, #46a758);
-  }
-  .cal-day.part {
-    border-color: color-mix(in srgb, var(--warn, #e2a03f) 55%, transparent);
-    color: var(--warn, #e2a03f);
-  }
-  .cal-day.cloudy,
-  .cal-day.unknown {
-    border-color: var(--border);
-    color: var(--text-2);
-  }
-  .cal-day.has:hover {
-    border-color: var(--text-1);
-  }
-  .cal-day.on {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-text);
-    font-weight: 700;
-  }
   /* a pinned date is a fact about the pixels; "latest" is an inference from the
      pass list — they must not look identical */
   .date-pill.exact {
@@ -4367,10 +3565,6 @@
   .date-pill .tag.layer {
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  }
-  .menu-row + .custom-size {
-    justify-content: flex-end;
-    padding: 2px 0;
   }
   .prov.dates {
     display: flex;
@@ -4621,6 +3815,7 @@
     overflow: hidden;
     flex-shrink: 0;
   }
+  .cap.focused { outline: 1px solid var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
   .cap-goto {
     display: block;
     width: 100%;

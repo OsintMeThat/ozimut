@@ -4,6 +4,7 @@
   import { adjustDefaults, isNeutral } from '../../lib/inspect.js';
   import Icon from '../../components/Icon.svelte';
   import AdjustSliders from './AdjustSliders.svelte';
+  import OrientationControls from './OrientationControls.svelte';
 
   // Right-panel menu for the Selection tab: scrub the video, capture frames into
   // the transient tray (nothing is filed here), and tune video-level adjustments
@@ -93,8 +94,17 @@
   </button>
   <p class="hint tray-note">
     <Icon name="layers" size={12} /> {session.frames.length} frame{session.frames.length === 1 ? '' : 's'}
-    in tray — nothing is saved until the Save tab.
+    in the tray. Nothing is saved until you use the Save tab.
   </p>
+
+  <div class="section">
+    <div class="section-head"><span>Orientation</span></div>
+    <OrientationControls
+      value={session.videoRotation}
+      onchange={(angle) => (session.videoRotation = angle)}
+      hint="The saved video and any new frames use this orientation."
+    />
+  </div>
 
   <div class="section">
     <button class="section-head as-btn" onclick={() => (showGear = !showGear)}>
@@ -118,7 +128,7 @@
         {scanning ? 'Scanning…' : 'Scan'}
       </button>
     </div>
-    <p class="hint">Samples the clip and ranks frames by focus — sharper is higher.</p>
+    <p class="hint">Samples the clip and ranks frames by focus. Higher scores are sharper.</p>
     {#each suggestions as s (s.time)}
       <div class="sugg" class:top={s.rank === 0}>
         <span class="mono">{fmt(s.time)}</span>

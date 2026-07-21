@@ -9,6 +9,8 @@
  * bare coordinates; a token body expresses either without special-casing.
  */
 
+import { entityReference, mediaReference } from './markdown.js';
+
 // The tokens an analyst can drop into a thread body. `sample` feeds the editor
 // preview so the layout reads before any real draft exists.
 export const TWEET_TOKENS = [
@@ -86,41 +88,98 @@ export function postComposeUrl(target, text) {
 }
 
 /**
- * Turn a prepared social thread into a portable, deliberately small Markdown
- * report. This is an export handoff, not the future full Report Builder.
+ * Turn a prepared social thread into a readable case-note report.
+ *
+ * ``proofEntity`` and ``mediaEntities`` use the Notebook's local reference
+ * syntax, so saved reports keep clickable case links and render their evidence
+ * from local media instead of copying files or embedding base64 data.
  */
 export function postReportMarkdown({
   title,
   place,
   plusCode,
   coordinates,
+  dms,
+  mapLinks = {},
   description,
   source,
-  posts = [],
   attachments = [],
+  proofEntity = null,
+  mediaEntities = [],
 } = {}) {
   const clean = (value) => String(value ?? '').trim();
+  const cell = (value) => clean(value).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
+  const inlineCode = (value) => `\`${clean(value).replace(/`/g, '\\`')}\``;
   const reportTitle = clean(title) || 'Untitled report';
   const location = [
-    clean(place) && `Place: ${clean(place)}`,
-    clean(plusCode) && `Plus code: ${clean(plusCode)}`,
-    clean(coordinates) && `Coordinates: ${clean(coordinates)}`,
+    clean(place) && ['Place', cell(place)],
+    clean(coordinates) && ['Coordinates', inlineCode(coordinates)],
+    clean(dms) && ['DMS', inlineCode(dms)],
+    clean(plusCode) && ['Plus code', inlineCode(plusCode)],
   ].filter(Boolean);
-  const cleanPosts = posts.map(clean).filter(Boolean);
+  const mapRows = Object.entries(mapLinks ?? {})
+    .map(([label, href]) => [cell(label), clean(href)])
+    .filter(([, href]) => /^https?:\/\//i.test(href));
+  if (mapRows.length) {
+    location.push([
+      'Maps',
+      mapRows.map(([label, href]) => `[${label}](${href})`).join(' · '),
+    ]);
+  }
   const cleanAttachments = [...new Set(attachments.map(clean).filter(Boolean))];
   const sections = [`# ${reportTitle}`];
 
-  if (location.length) sections.push(`## Location\n\n${location.join('\n')}`);
+  if (location.length) {
+    sections.push([
+      '## Location',
+      '',
+      '| Detail | Value |',
+      '| --- | --- |',
+      ...location.map(([label, value]) => `| ${label} | ${value} |`),
+    ].join('\n'));
+  }
   if (clean(description)) sections.push(`## Assessment\n\n${clean(description)}`);
-  if (clean(source)) sections.push(`## Source\n\n${clean(source)}`);
-  if (cleanPosts.length) {
-    sections.push(`## Prepared posts\n\n${cleanPosts
-      .map((post, index) => `### ${index + 1}\n\n${post}`)
-      .join('\n\n')}`);
+  if (clean(source)) {
+    const sourceText = clean(source);
+    const sourceValue = /^https?:\/\//i.test(sourceText)
+      ? `[Open original source](${sourceText})`
+      : sourceText;
+    sections.push(`## Source\n\n${sourceValue}`);
   }
-  if (cleanAttachments.length) {
-    sections.push(`## Attachments\n\n${cleanAttachments.map((path) => `- ${path}`).join('\n')}`);
+  const mediaByPath = new Map(
+    mediaEntities
+      .filter((entity) => entity?.id && entity?.attrs?.path)
+      .map((entity) => [entity.attrs.path, entity]),
+  );
+  const evidence = [];
+  if (proofEntity?.id && proofEntity.attrs?.path) {
+    evidence.push([
+      '### Proof',
+      entityReference(proofEntity),
+      '',
+      '::: center',
+      `${mediaReference(proofEntity)}{width=100% align=center}`,
+      ':::',
+    ].join('\n'));
+  } else if (cleanAttachments[0]?.startsWith('proofs/')) {
+    evidence.push(`### Proof\n\n- ${inlineCode(cleanAttachments[0])}`);
   }
+
+  const mediaPaths = cleanAttachments.filter((path) => !path.startsWith('proofs/'));
+  const renderedMedia = mediaPaths.map((path) => {
+    const entity = mediaByPath.get(path);
+    if (!entity) return `- ${inlineCode(path)}`;
+    return [
+      `### ${cell(entity.label || path)}`,
+      entityReference(entity),
+      '',
+      '::: center',
+      `${mediaReference(entity)}{width=100% align=center}`,
+      ':::',
+    ].join('\n');
+  });
+  if (renderedMedia.length) evidence.push(...renderedMedia);
+  if (evidence.length) sections.push(`## Evidence\n\n${evidence.join('\n\n')}`);
   return `${sections.join('\n\n')}\n`;
 }
 

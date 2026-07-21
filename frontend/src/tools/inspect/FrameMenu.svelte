@@ -1,10 +1,11 @@
 <script>
   import { api } from '../../lib/api.js';
   import { caseState, toast } from '../../lib/state.svelte.js';
-  import { adjustDefaults, buildOps, previewStyle, cropImgStyle, styleText } from '../../lib/inspect.js';
+  import { adjustDefaults, buildFrameOps, previewStyle, cropImgStyle, styleText } from '../../lib/inspect.js';
   import Icon from '../../components/Icon.svelte';
   import AdjustSliders from './AdjustSliders.svelte';
   import CropControls from './CropControls.svelte';
+  import OrientationControls from './OrientationControls.svelte';
 
   // Right-panel menu for the Frame tab. Works on the *active* tray frame:
   // pick it, adjust it (live-previewed), crop it, or analyse it — all without
@@ -12,6 +13,7 @@
   let {
     session, filters, analyses, activeFrame, shared, removeFrame, setActive,
     cropAspect = $bindable(null), cropEditing = $bindable(false), beginCrop, commitCrop,
+    setRotation, rotationBusy = false,
   } = $props();
 
   let showAnalyze = $state(false);
@@ -19,13 +21,14 @@
   let analysis = $state(null);
   let canvasEl = $state();
 
-  function reset() {
+  async function reset() {
     if (!activeFrame) return;
     activeFrame.adjust = adjustDefaults(filters);
     activeFrame.crop = null;
     shared.cropMode = false;
     cropAspect = null;
     cropEditing = false;
+    await setRotation(0);
   }
 
   function clearCrop() {
@@ -44,7 +47,7 @@
         path: activeFrame.path,
         name,
         time: activeFrame.time ?? null,
-        ops: buildOps(filters, activeFrame.adjust, activeFrame.crop),
+        ops: buildFrameOps(filters, activeFrame),
       });
       if (analysis.kind === 'histogram') requestAnimationFrame(drawHistogram);
     } catch (e) {
@@ -104,6 +107,13 @@
 
   {#if activeFrame}
     <div class="section">
+      <div class="section-head"><span>Orientation</span></div>
+      <OrientationControls
+        value={activeFrame.rotation ?? 0}
+        disabled={rotationBusy}
+        onchange={setRotation}
+        hint="The saved image uses this orientation."
+      />
       <AdjustSliders {filters} values={activeFrame.adjust} />
       <div class="crop-block">
         <div class="crop-row">
@@ -230,7 +240,7 @@
     bottom: 2px;
     left: 2px;
     background: var(--accent);
-    color: #10141c;
+    color: var(--accent-text);
     border-radius: 4px;
     display: flex;
     padding: 1px;

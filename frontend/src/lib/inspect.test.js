@@ -3,9 +3,40 @@ import {
   clampCrop, moveCrop, resizeCropByHandle,
   QUAD_SIDES, quadEdgeMidpoints, moveQuadEdge, quadCentroid,
   quadsBounds, translateQuad, moveQuads, rotateQuads, scaleQuads, pinholeOps,
+  buildFrameOps, hasVideoEdits, normalizeRightAngleRotation, rotationOps,
 } from './inspect.js';
 
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
+
+describe('video orientation', () => {
+  const filters = [{ id: 'brightness', params: [{ name: 'amount', default: 1 }] }];
+
+  it('accepts only the supported right-angle orientations', () => {
+    expect([-180, -90, 0, 90, 180].map(normalizeRightAngleRotation)).toEqual([-180, -90, 0, 90, 180]);
+    expect(normalizeRightAngleRotation(45)).toBe(0);
+    expect(normalizeRightAngleRotation('bad')).toBe(0);
+  });
+
+  it('makes a rotation-only video saveable', () => {
+    expect(hasVideoEdits(filters, { brightness: 1 }, 90)).toBe(true);
+    expect(hasVideoEdits(filters, { brightness: 1 }, 0)).toBe(false);
+    expect(hasVideoEdits(filters, { brightness: 1.2 }, 0)).toBe(true);
+  });
+
+  it('carries the video orientation into captured-frame recipes', () => {
+    const frame = {
+      sourceOps: rotationOps(-90),
+      rotation: 180,
+      adjust: { brightness: 1.2 },
+      crop: null,
+    };
+    expect(buildFrameOps(filters, frame)).toEqual([
+      { op: 'rotate', params: { angle: -90 } },
+      { op: 'rotate', params: { angle: 180 } },
+      { op: 'brightness', params: { amount: 1.2 } },
+    ]);
+  });
+});
 
 describe('pinholeOps', () => {
   const remap = { op: 'remap', params: { warp: 'cylindrical' } };
