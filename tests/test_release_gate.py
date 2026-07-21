@@ -191,6 +191,10 @@ def test_release_tooling_is_bounded_and_built_from_the_lock():
     assert "--no-editable" in workflow
     assert "uv run python" not in workflow
     assert "body_path: docs/RELEASE_NOTES.md" in workflow
+    release_job = workflow.split("  release:\n", maxsplit=1)[1]
+    assert release_job.index("actions/checkout@v4") < release_job.index(
+        "softprops/action-gh-release@v2"
+    )
     assert (root / "docs" / "RELEASE_NOTES.md").is_file()
 
 
