@@ -9,6 +9,7 @@
 # are collected explicitly because they are loaded dynamically and PyInstaller
 # can't see them.
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -19,6 +20,18 @@ hiddenimports = (
     + collect_submodules("yt_dlp")
     + collect_submodules("gallery_dl")
 )
+
+# Linux only: yt-dlp reaches for these lazily to unseal a Chromium-family
+# browser's cookies from the Secret Service keyring (gated downloads, see
+# engine/media.py + pyproject.toml). They aren't submodules of anything above,
+# so PyInstaller can't discover them on its own. macOS uses the `security` CLI
+# and Windows uses the cookies.txt fallback, so neither bundles these.
+if sys.platform == "linux":
+    hiddenimports += (
+        collect_submodules("secretstorage")
+        + collect_submodules("jeepney")
+        + ["cryptography"]
+    )
 
 # Grabs azimut/static/** (index.html, assets, favicon) from the installed package.
 datas = collect_data_files("azimut")
@@ -52,8 +65,6 @@ pyz = PYZ(a.pure)
 # The .exe icon. Windows is the only shipped artifact that embeds one: Linux
 # binaries can't, and our macOS artifact is a raw binary (not an .app bundle),
 # so Finder shows no custom icon there either. PyInstaller wants a .ico.
-import sys
-
 ico = Path(SPECPATH) / "azimut.ico"
 icon = str(ico) if sys.platform == "win32" and ico.is_file() else None
 

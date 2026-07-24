@@ -1723,8 +1723,10 @@
   const KIND_ICON = { rect: 'square', ellipse: 'circle', arrow: 'arrow', line: 'line', curve: 'curve', freehand: 'freehand', text: 'text' };
   const KIND_LABEL = { rect: 'Box', ellipse: 'Ellipse', arrow: 'Arrow', line: 'Line', curve: 'Curve', freehand: 'Freehand', text: 'Text' };
 
-  // Color / stroke controls act on the selected shape when there is one
-  // (live edit), otherwise they set the defaults for the next drawn shape.
+  // Color / stroke controls live-edit the selected shape when there is one, and
+  // always remember the pick as the default for the next drawn shape — the last
+  // colour/width you touched stays your working colour, whether or not something
+  // was selected at the time.
   function setColor(c) {
     if (selectedShape) {
       const oldColor = selectedShape.color;
@@ -1735,21 +1737,23 @@
         delete proof.notes[oldColor];
       }
       dirty = true;
-    } else {
-      color = c;
     }
+    color = c;
   }
 
   function setStroke(w) {
+    // Font size is a text-only property, so editing it must not overwrite the
+    // stroke-width default used for the next drawn shape.
     if (selectedShape?.kind === 'text') {
       selectedShape.fontSize = w;
       dirty = true;
-    } else if (selectedShape) {
+      return;
+    }
+    if (selectedShape) {
       selectedShape.strokeWidth = w;
       dirty = true;
-    } else {
-      strokeW = w;
     }
+    strokeW = w;
   }
 
   // Arrow-key nudge of the selected element, in panel-natural pixels.

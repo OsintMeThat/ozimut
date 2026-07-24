@@ -9,35 +9,35 @@ case is a plain folder that can be reopened, archived or shared.
 *The name is the French word for azimuth, the compass bearing you sight along
 to fix a point on the map.*
 
-## v0.2.1: Scalable case workspace
+## v0.2.2: Login-walled downloads
 
 | Tool | What it does |
 |------|--------------|
-| **Media Library** | Import local files or download by URL (X, Telegram, TikTok, YouTube, Instagram and more via yt-dlp, with a gallery-dl fallback for image-only posts). Each item gets a clean local file, metadata and a SHA-256. Multi-photo posts open a picker. |
-| **Inspect** | A scratch workspace over any photo or video: frame adjustments, editable crop, sharpest-frame capture, hand-made collage with per-piece warp/scale/rotate, and auto-stitch to solve a panorama's layout for you. Nothing enters the case until you save. |
-| **Satellite** | Coordinates or a place name become an imagery crop, with select-area capture, map rotation, measurement tools and reference-image overlays. Esri/OSM by default; add a Mapbox or Google key for more basemaps. |
+| **Media** | Import local files or download by URL (X, Telegram, TikTok, YouTube, Instagram and more via yt-dlp, with a gallery-dl fallback for image-only posts). Public media is fetched cookie-less; a login-walled post prompts once for a browser session or an exported `cookies.txt`. Each item gets a clean local file, metadata and a SHA-256. Multi-photo posts open a picker. |
+| **Reverse Search** | Prepare an image or a video frame for keyless reverse-image services. Nothing uploads on its own. |
+| **Inspect** | A scratch workspace over any photo or video: frame adjustments, editable crop, sharpest-frame capture, hand-made collage with per-piece warp/scale/rotate, auto-stitch to solve a panorama's layout, and ELA hints. Nothing enters the case until you save. |
+| **Satellite** | Coordinates or a place name become an imagery crop, with select-area capture, map rotation, measurement tools, reference overlays and editable AOI grids for area review. Esri/OSM by default; add a Mapbox or Google key for more basemaps. |
+| **Coordinates** | Convert common coordinate formats, copy the result, and open map or geocoding links. |
 | **Geo Proof** | Start a named proof from a reusable house style, select case panels with search, compose them in a grid or free layout, annotate with colored shapes/freehand/text, and export `proof.png` plus a re-editable spec. |
 | **Geo Report** | Turn a proof into a prepared thread for X, Bluesky, or Mastodon: coordinates, plus code, attribution, target-specific character counts, media, and a structured Markdown case note with linked evidence. |
+| **Notebook** | Tabbed Markdown notes with local media, linked case evidence, broken-reference markers and a print-ready PDF view. |
+
+Under the hood: reusable proof and thread templates, per-case SQLite with a
+bounded catalog, a durable one-worker thumbnail queue, the map-capture browser
+extension, and cross-platform binaries with a bundled ffmpeg.
 
 Every tool works one-shot (a scratch session, no setup) or inside a case, a
 plain directory holding the whole investigation.
 
-New in v0.2.1:
+New in v0.2.2:
 
-- Existing JSON case graphs migrate automatically to per-case SQLite on open.
-  Media, notes and proofs remain ordinary files, the original graph is retained
-  as a recoverable backup, and a closed case folder stays portable.
-- The case sidebar now loads a bounded catalog, with folders, suggestions and
-  unfiled work fetched as needed. Video thumbnails use a durable one-worker
-  queue, so large cases remain responsive.
-- Case Notebook adds tabbed Markdown notes with local media, linked evidence,
-  broken-reference markers and a print-ready PDF view.
-- Geo Proof, Geo Report, Inspect and Satellite now have clearer, componentised
-  canvas workflows. Browser tests exercise real Konva and Leaflet gestures in
-  Chromium and Firefox.
-- Release builds now use the lock for distribution tooling, smoke-test the
-  launched binary and verify its bundled `ffmpeg` and `ffprobe`. The local
-  relaunch helper works on Windows, Linux and macOS.
+- Downloads now handle login-walled media. The first attempt is always
+  cookie-less; only when a post turns out to need an account does Media offer to
+  borrow a signed-in browser's session or an exported `cookies.txt`. The session
+  is used for that download, kept 0600 in the workspace, and never leaves the
+  machine. Chromium on Windows can't be read, so it points you to the file route.
+- The Geo Proof toolbar reflows to fit narrow screens instead of overflowing,
+  and remembers the color and stroke width you last drew with.
 
 ## Install & run
 
@@ -197,7 +197,7 @@ wheel + Windows/Linux/macOS binaries, attaches them to a GitHub release, and
 publishes to PyPI. **Don't publish by hand.**
 
 ```bash
-git tag v0.2.1 && git push origin v0.2.1
+git tag v0.2.2 && git push origin v0.2.2
 ```
 
 One-time setup: register the repo as a

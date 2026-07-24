@@ -163,6 +163,25 @@ def test_storage_and_jobs_add_no_new_runtime_dependency():
         assert banned not in text  # no heavyweight queue/DB dependency slipped in
 
 
+def test_chromium_cookie_decrypt_dependency_ships_on_linux():
+    """yt-dlp needs secretstorage to read a Chromium-family browser's cookies on
+    Linux (gated downloads). Nothing in src imports it directly — it's used at
+    runtime through yt-dlp — so this guards it against an "unused dep" cleanup,
+    and pins it Linux-only + bounded so it never touches the Windows/macOS
+    binaries or drifts past an untested major."""
+    deps = _pyproject()["project"]["dependencies"]
+    secret = next((d for d in deps if d.startswith("secretstorage")), None)
+    assert secret is not None, "secretstorage must stay declared for Chromium-on-Linux cookies"
+    assert "sys_platform == 'linux'" in secret  # never installed on Windows/macOS
+    assert "<4" in secret  # bounded at the next untested major, like every other range
+
+    # the frozen Linux binary must bundle it: yt-dlp imports it lazily, so the
+    # PyInstaller spec collects it explicitly (macOS/Windows skip this branch).
+    spec = (Path(__file__).resolve().parent.parent / "packaging" / "azimut.spec").read_text()
+    assert 'collect_submodules("secretstorage")' in spec
+    assert 'sys.platform == "linux"' in spec
+
+
 def test_case_db_lives_under_the_workspace_root(tmp_workspace):
     case = Case.create("Where")
     assert case.path.is_relative_to(workspace.config.workspace_root())

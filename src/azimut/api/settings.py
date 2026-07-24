@@ -55,6 +55,15 @@ class HomeView(BaseModel):
     zoom: int = Field(ge=1, le=21)
 
 
+class DownloadCookiesIn(BaseModel):
+    """The login source for gated downloads the user picks in Settings. The
+    ``file`` source is set by the cookies-file upload, not here — through this
+    field the user only chooses a browser or turns cookies off."""
+
+    source: Literal["none", "browser"]
+    browser: str | None = None  # required and validated when source == "browser"
+
+
 class PrefsIn(BaseModel):
     """Keyed-provider and display preferences — None leaves a field untouched."""
 
@@ -82,6 +91,8 @@ class PrefsIn(BaseModel):
     # the user muted with "don't show again"
     update_check_on_start: bool | None = None
     update_dismissed_version: str | None = None
+    # login source for gated media downloads (engine/media.py); None leaves it
+    download_cookies: DownloadCookiesIn | None = None
 
 
 def _prefs(settings: dict[str, Any]) -> dict[str, Any]:
@@ -102,6 +113,7 @@ def _prefs(settings: dict[str, Any]) -> dict[str, Any]:
         "signature_handle": settings.get("signature_handle", DEFAULT_SIGNATURE_HANDLE),
         "update_check_on_start": bool(settings.get("update_check_on_start", True)),
         "update_dismissed_version": settings.get("update_dismissed_version", ""),
+        "download_cookies": settings.get("download_cookies", {"source": "none"}),
     }
 
 
@@ -121,6 +133,9 @@ def get_settings() -> dict[str, Any]:
         # whether a logo is on disk — the proof composer's signature control is
         # dead until one is, so it needs to know without fetching the pixels
         "signature": config.signature_path().is_file(),
+        # whether an exported cookies.txt is on disk — Settings shows the file
+        # fallback as present without ever serving the session back out
+        "cookies_file": config.cookies_file_path().is_file(),
         **_prefs(settings),
         # what the soft block actually measures against: the documented default
         # per meter, or the user's own figure where they corrected it
@@ -157,7 +172,14 @@ def put_prefs(body: PrefsIn) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=f"unknown units '{body.units}'")
     if body.post_target is not None and body.post_target not in config.POST_TARGETS:
         raise HTTPException(status_code=422, detail=f"unknown post_target '{body.post_target}'")
+    if body.download_cookies is not None and body.download_cookies.source == "browser":
+        browser = body.download_cookies.browser
+        if browser not in config.COOKIE_BROWSERS:
+            raise HTTPException(status_code=422, detail=f"unknown browser '{browser}'")
     settings = config.update_settings(lambda s: _apply_prefs(s, body))
+    # a login session on disk is a liability once it isn't the chosen source
+    if body.download_cookies is not None:
+        config.cookies_file_path().unlink(missing_ok=True)
     return _prefs(settings)
 
 
@@ -212,6 +234,13 @@ def _apply_prefs(settings: dict[str, Any], body: PrefsIn) -> None:
         settings["update_check_on_start"] = bool(body.update_check_on_start)
     if body.update_dismissed_version is not None:
         settings["update_dismissed_version"] = body.update_dismissed_version.strip()[:64]
+    if body.download_cookies is not None:
+        dc = body.download_cookies
+        settings["download_cookies"] = (
+            {"source": "browser", "browser": dc.browser}
+            if dc.source == "browser"
+            else {"source": "none"}
+        )
 
 
 @router.put("/settings/keys")
@@ -514,6 +543,45 @@ async def put_signature(file: UploadFile) -> dict[str, Any]:
 def delete_signature() -> dict[str, Any]:
     config.signature_path().unlink(missing_ok=True)
     return {"signature": False}
+
+
+# ---- cookies.txt: the fallback login source where reading the browser can't --
+
+# A Netscape cookies.txt is a few KB; this bounds an untrusted upload, it isn't
+# a real limit. The browser path needs no file at all.
+COOKIES_FILE_MAX_BYTES = 1 * 1024 * 1024
+
+
+@router.post("/settings/cookies-file")
+async def put_cookies_file(file: UploadFile) -> dict[str, Any]:
+    """Store an exported cookies.txt and select it as the download login source.
+
+    The bytes are a live session, so the file is written 0600 beside
+    settings.json and never served back out.
+    """
+    data = await file.read(COOKIES_FILE_MAX_BYTES + 1)
+    if len(data) > COOKIES_FILE_MAX_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"cookies file must be under {COOKIES_FILE_MAX_BYTES // 1024 // 1024} MB",
+        )
+    path = config.cookies_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    config._restrict(path, 0o600)
+    settings = config.update_settings(
+        lambda s: s.__setitem__("download_cookies", {"source": "file", "file": path.name})
+    )
+    return _prefs(settings)
+
+
+@router.delete("/settings/cookies-file")
+def delete_cookies_file() -> dict[str, Any]:
+    config.cookies_file_path().unlink(missing_ok=True)
+    settings = config.update_settings(
+        lambda s: s.__setitem__("download_cookies", {"source": "none"})
+    )
+    return _prefs(settings)
 
 
 # ---- scrapers: the two dependencies that rot on someone else's schedule -------

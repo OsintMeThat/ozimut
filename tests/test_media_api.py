@@ -352,7 +352,7 @@ def test_download_route_surfaces_multi_via_job(client, monkeypatch):
     monkeypatch.setattr(
         media_engine,
         "download_url",
-        lambda case, url, progress_hook=None, index=None, title=None: {
+        lambda case, url, progress_hook=None, index=None, title=None, cookies=None: {
             "multi": True,
             "items": media_engine._picker_items(entries),
         },
@@ -414,10 +414,11 @@ def test_download_autofills_title_from_extraction(client, monkeypatch):
     assert result["item"]["title"] == "Strike footage"
 
 
-def _install_failing_ydl(monkeypatch):
+def _install_failing_ydl(monkeypatch, message="No video could be found in this tweet"):
     """A fake yt_dlp module whose extract_info always raises DownloadError —
     used to exercise the gallery-dl fallback (yt-dlp's extractors are
-    video-first and hard-fail on e.g. a photo-only tweet)."""
+    video-first and hard-fail on e.g. a photo-only tweet). ``message`` lets a
+    test choose an auth-shaped vs. a generic failure."""
     import sys
     import types
 
@@ -435,7 +436,7 @@ def _install_failing_ydl(monkeypatch):
             return False
 
         def extract_info(self, url, download=False):
-            raise DownloadError("No video could be found in this tweet")
+            raise DownloadError(message)
 
     utils = types.ModuleType("yt_dlp.utils")
     utils.DownloadError = DownloadError
@@ -739,3 +740,239 @@ def test_download_job_bad_url(client):
         time.sleep(0.1)
     assert job["status"] == "error"
     assert job["error"]
+
+
+# --- gated downloads: on-demand cookies (v2) ------------------------------
+
+
+def test_public_download_never_passes_cookies(client, monkeypatch):
+    """Local-first: the first (default) attempt must carry no cookie options at
+    all — public media is downloaded without ever touching the browser session,
+    even once a cookie source has been saved."""
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "NoCookies"}).json()["id"]
+    case = Case.open(cid)
+
+    def extract_info(ydl, url, download):
+        assert "cookiesfrombrowser" not in ydl.opts
+        assert "cookiefile" not in ydl.opts
+        return {"id": "abc123", "title": "Public clip"}
+
+    _install_fake_ydl(monkeypatch, extract_info)
+    result = media_engine.download_url(case, "https://example.com/watch?v=abc123")
+    assert result["item"]["title"] == "Public clip"
+
+
+def test_auth_wall_returns_needs_auth(client, monkeypatch):
+    """A login-gated link (yt-dlp reports an auth-shaped error, gallery-dl has
+    no extractor) must not just error — it returns a needs_auth signal carrying
+    the platform so the UI can offer the cookie affordance."""
+    import sys
+
+    import gallery_dl.extractor as gdl_extractor
+
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "Gated"}).json()["id"]
+    case = Case.open(cid)
+
+    _install_failing_ydl(monkeypatch, "ERROR: Private video. Sign in if you've been granted access")
+    monkeypatch.setattr(gdl_extractor, "find", lambda url: None)
+
+    result = media_engine.download_url(case, "https://youtube.com/watch?v=priv")
+    assert result == {"needs_auth": True, "platform": sys.platform}
+
+
+def test_gallery_auth_error_returns_needs_auth(client, monkeypatch):
+    """The image path can hit the wall too: gallery-dl raising its typed
+    AuthenticationError must surface needs_auth, not crash the job."""
+    import sys
+
+    import gallery_dl.extractor as gdl_extractor
+
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "GatedImg"}).json()["id"]
+    case = Case.open(cid)
+
+    class AuthenticationError(Exception):
+        pass
+
+    def boom(url):
+        raise AuthenticationError("Login required")
+
+    _install_failing_ydl(monkeypatch, "No video could be found")
+    monkeypatch.setattr(gdl_extractor, "find", boom)
+
+    result = media_engine.download_url(case, "https://instagram.com/p/priv")
+    assert result == {"needs_auth": True, "platform": sys.platform}
+
+
+def test_non_auth_failure_does_not_prompt_cookies(client, monkeypatch):
+    """A dead link (no auth signal anywhere) keeps today's behavior: a plain
+    error, never a cookie prompt the user can do nothing useful with."""
+    import gallery_dl.extractor as gdl_extractor
+
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "Dead"}).json()["id"]
+    case = Case.open(cid)
+
+    _install_failing_ydl(monkeypatch, "ERROR: Unable to download webpage: HTTP Error 404")
+    monkeypatch.setattr(gdl_extractor, "find", lambda url: None)
+
+    try:
+        media_engine.download_url(case, "https://example.com/nope")
+        raise AssertionError("expected RuntimeError, not a needs_auth prompt")
+    except RuntimeError as exc:
+        assert "no extractor" in str(exc)
+
+
+def test_retry_with_browser_threads_cookiesfrombrowser(client, monkeypatch):
+    """Retrying a gated link with a browser cookie source hands yt-dlp
+    cookiesfrombrowser=(name,) so it downloads as the logged-in user."""
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "CookieBrowser"}).json()["id"]
+    case = Case.open(cid)
+
+    def extract_info(ydl, url, download):
+        assert ydl.opts["cookiesfrombrowser"] == ("firefox",)
+        return {"id": "abc123", "title": "Gated clip"}
+
+    _install_fake_ydl(monkeypatch, extract_info)
+    result = media_engine.download_url(
+        case, "https://youtube.com/watch?v=priv", cookies={"browser": "firefox"}
+    )
+    assert result["item"]["title"] == "Gated clip"
+
+
+def test_windows_chromium_returns_guidance(client, monkeypatch):
+    """On Windows a Chromium cookie DB is locked/app-bound-encrypted, so we do
+    not even attempt it: pick Chrome there and the backend returns a guidance
+    signal instead of constructing yt-dlp."""
+    import sys
+
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "WinChrome"}).json()["id"]
+    case = Case.open(cid)
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    called = []
+    _install_fake_ydl(monkeypatch, lambda ydl, url, download: called.append(1) or {"id": "x"})
+
+    result = media_engine.download_url(
+        case, "https://youtube.com/watch?v=priv", cookies={"browser": "chrome"}
+    )
+    assert result == {"needs_auth": True, "guidance": "windows-chromium"}
+    assert called == [], "must not touch yt-dlp for a locked Windows Chromium store"
+
+
+def test_cookies_file_threads_absolute_cookiefile(client, monkeypatch):
+    """A cookies.txt source hands yt-dlp an absolute cookiefile path (resolved
+    against the workspace when relative)."""
+    import os
+
+    from azimut.engine import media as media_engine
+    from azimut.workspace import Case
+
+    cid = client.post("/api/cases", json={"name": "CookieFile"}).json()["id"]
+    case = Case.open(cid)
+
+    def extract_info(ydl, url, download):
+        assert os.path.isabs(ydl.opts["cookiefile"])
+        assert ydl.opts["cookiefile"].endswith("cookies.txt")
+        return {"id": "abc123", "title": "Gated via file"}
+
+    _install_fake_ydl(monkeypatch, extract_info)
+    result = media_engine.download_url(
+        case, "https://youtube.com/watch?v=priv", cookies={"file": "cookies.txt"}
+    )
+    assert result["item"]["title"] == "Gated via file"
+
+
+def test_apply_gallery_cookies_sets_browser_then_file(monkeypatch):
+    """The gallery-dl path threads cookies through gallery_dl.config: a browser
+    source as a [name] list, a file source as a path string."""
+    import sys
+    import types
+
+    from azimut.engine import media as media_engine
+
+    calls = []
+    config_mod = types.ModuleType("gallery_dl.config")
+    config_mod.set = lambda path, key, value: calls.append((path, key, value))
+    gdl = types.ModuleType("gallery_dl")
+    gdl.config = config_mod
+    monkeypatch.setitem(sys.modules, "gallery_dl", gdl)
+    monkeypatch.setitem(sys.modules, "gallery_dl.config", config_mod)
+
+    media_engine._apply_gallery_cookies({"browser": "firefox"})
+    assert calls[-1] == (("extractor",), "cookies", ["firefox"])
+
+    media_engine._apply_gallery_cookies({"file": "cookies.txt"})
+    path, key, value = calls[-1]
+    assert (path, key) == (("extractor",), "cookies")
+    assert value.endswith("cookies.txt")
+
+    calls.clear()
+    media_engine._apply_gallery_cookies(None)
+    assert calls == [], "no cookies → no gallery-dl config mutation"
+
+
+def test_cookies_from_preference_maps_each_source():
+    from azimut.engine import media as media_engine
+
+    assert media_engine.cookies_from_preference(None) is None
+    assert media_engine.cookies_from_preference({"source": "none"}) is None
+    assert media_engine.cookies_from_preference({"source": "browser", "browser": "firefox"}) == {
+        "browser": "firefox"
+    }
+    assert media_engine.cookies_from_preference({"source": "file", "file": "cookies.txt"}) == {
+        "file": "cookies.txt"
+    }
+    # an incomplete record is treated as off, never a half-applied source
+    assert media_engine.cookies_from_preference({"source": "browser"}) is None
+
+
+def test_download_use_cookies_threads_saved_preference(client, monkeypatch):
+    """The download route stays cookie-less by default; only ``use_cookies``
+    reads the saved preference and hands it to the engine — that's what keeps
+    public media off the login session."""
+    from azimut.engine import media as media_engine
+
+    cid = client.post("/api/cases", json={"name": "UseCookies"}).json()["id"]
+    client.put(
+        "/api/settings/prefs",
+        json={"download_cookies": {"source": "browser", "browser": "firefox"}},
+    )
+
+    seen = []
+
+    def fake_download(case, url, progress_hook=None, *, index=None, title=None, cookies=None):
+        seen.append(cookies)
+        return {"multi": False, "duplicate": False, "item": {"path": "media/x"}, "entity": {}}
+
+    monkeypatch.setattr(media_engine, "download_url", fake_download)
+
+    for use_cookies, expected in ((False, None), (True, {"browser": "firefox"})):
+        job_id = client.post(
+            f"/api/cases/{cid}/media/download",
+            json={"url": "https://x.test/1", "use_cookies": use_cookies},
+        ).json()["job_id"]
+        for _ in range(100):
+            job = client.get(f"/api/jobs/{job_id}").json()
+            if job["status"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["status"] == "done"
+
+    assert seen == [None, {"browser": "firefox"}]

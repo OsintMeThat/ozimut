@@ -110,6 +110,15 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     #   for. The pop-up stays quiet for that exact tag; a newer one shows again.
     "update_check_on_start": True,
     "update_dismissed_version": "",
+    # Login session for gated media downloads (engine/media.py). Applied only
+    # when a download hits a login wall — public media is always fetched
+    # cookie-less, so this never touches the everyday case. Shapes:
+    # - {"source": "none"}                     — off (default)
+    # - {"source": "browser", "browser": name} — read the browser's live cookies
+    #   (yt-dlp's names: firefox, chrome, chromium, edge, brave, opera, safari, …)
+    # - {"source": "file", "file": "cookies.txt"} — a workspace-relative export,
+    #   the fallback where reading the browser can't work (Chromium on Windows).
+    "download_cookies": {"source": "none"},
 }
 
 # Accepted values for the display preferences above — mirror of
@@ -187,6 +196,20 @@ def templates_path() -> Path:
     itself so the secrets file stays small and single-purpose.
     """
     return workspace_root() / "templates.json"
+
+
+# Browsers yt-dlp can read a login session from (cookiesfrombrowser). The
+# Settings API validates a chosen source against this; engine/media.py handles
+# the Chromium subset that can't be read on Windows.
+COOKIE_BROWSERS = frozenset(
+    {"brave", "chrome", "chromium", "edge", "firefox", "opera", "safari", "vivaldi", "whale"}
+)
+
+
+def cookies_file_path() -> Path:
+    """A user-exported cookies.txt for gated downloads. Holds a live login
+    session, so it stays 0600 beside settings.json, never inside a case."""
+    return workspace_root() / "cookies.txt"
 
 
 # Refuse anything larger as a signature: a logo is a small badge on a composite,

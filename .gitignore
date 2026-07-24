@@ -56,3 +56,9 @@ build-bin/
 
 # Native binaries downloaded by the release workflow
 packaging/vendor/
+
+# Local-only marketing/presentation assets, never pushed
+.docs/
+
+# Local-only design/brainstorming notes, never pushed
+docs/superpowers/

@@ -15,8 +15,26 @@
   let url = $state('');
   let picker = $state(null); // multi-item picker: {url, items: [{index, title, thumbnail, kind, selected}]}
   let dragOver = $state(false);
-  let jobs = $state([]); // active download jobs: {id, url, label, progress}
+  let jobs = $state([]); // active download jobs: {id, url, label, progress, index, title}
   let fileInput;
+  let cookieFileInput = $state();
+  // cookie affordance, shown only when a download hits a login wall:
+  // {url, index, title, platform, guidance, browser, busy}
+  let authPrompt = $state(null);
+
+  // browsers yt-dlp can read a session from; the Chromium subset can't be read
+  // on Windows (locked/app-bound store) so we steer those to the file fallback
+  const COOKIE_BROWSERS = [
+    { id: 'firefox', label: 'Firefox' },
+    { id: 'chrome', label: 'Chrome' },
+    { id: 'edge', label: 'Edge' },
+    { id: 'brave', label: 'Brave' },
+    { id: 'chromium', label: 'Chromium' },
+    { id: 'opera', label: 'Opera' },
+    { id: 'safari', label: 'Safari' },
+    { id: 'vivaldi', label: 'Vivaldi' },
+  ];
+  const CHROMIUM_BROWSERS = new Set(['chrome', 'chromium', 'edge', 'brave', 'vivaldi', 'opera']);
 
   // --- category facets (auto-derived from kind + source) ---
   // Overlapping filters (a downloaded video matches both Videos and Downloads);
@@ -206,18 +224,52 @@
     startDownload(target);
   }
 
-  async function startDownload(target, index = null, title = null) {
+  async function startDownload(target, index = null, title = null, useCookies = false) {
     try {
       const c = await ensureCase();
       const { job_id } = await api.post(`/api/cases/${c.id}/media/download`, {
         url: target,
         index,
         title,
+        use_cookies: useCookies,
       });
-      jobs.push({ id: job_id, url: target, label: title || target, progress: {} });
+      jobs.push({ id: job_id, url: target, label: title || target, progress: {}, index, title });
       poll(job_id);
     } catch (e) {
       toast(e.message, 'danger');
+    }
+  }
+
+  // A gated link asked for a login. Retry after pointing the downloader at a
+  // browser session (saved as the app-wide source) or an exported cookies.txt.
+  async function retryWithBrowser() {
+    authPrompt.busy = true;
+    try {
+      await api.put('/api/settings/prefs', {
+        download_cookies: { source: 'browser', browser: authPrompt.browser },
+      });
+      const { url, index, title } = authPrompt;
+      authPrompt = null;
+      startDownload(url, index, title, true);
+    } catch (e) {
+      toast(e.message, 'danger');
+      authPrompt.busy = false;
+    }
+  }
+
+  async function retryWithCookieFile(file) {
+    if (!file) return;
+    authPrompt.busy = true;
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      await api.post('/api/settings/cookies-file', form);
+      const { url, index, title } = authPrompt;
+      authPrompt = null;
+      startDownload(url, index, title, true);
+    } catch (e) {
+      toast(e.message, 'danger');
+      authPrompt.busy = false;
     }
   }
 
@@ -244,7 +296,18 @@
         return;
       }
       jobs = jobs.filter((j) => j.id !== jobId);
-      if (status.status === 'done' && status.result?.multi) {
+      if (status.status === 'done' && status.result?.needs_auth) {
+        // login wall — offer a cookie source and retry, nothing downloaded yet
+        authPrompt = {
+          url: job.url,
+          index: job.index ?? null,
+          title: job.title ?? null,
+          platform: status.result.platform ?? '',
+          guidance: status.result.guidance ?? '',
+          browser: 'firefox',
+          busy: false,
+        };
+      } else if (status.status === 'done' && status.result?.multi) {
         // several attachments — nothing was downloaded yet, let the analyst pick
         picker = { url: job.url, items: status.result.items.map((i) => ({ ...i, selected: true })) };
       } else if (status.status === 'done') {
@@ -626,6 +689,61 @@
   </Modal>
 {/if}
 
+<!-- cookie affordance: shown only when a download hits a login wall. The first
+     attempt is always cookie-less, so this never interrupts public media. -->
+{#if authPrompt}
+  {@const chromiumBlocked =
+    authPrompt.guidance === 'windows-chromium' ||
+    (authPrompt.platform === 'win32' && CHROMIUM_BROWSERS.has(authPrompt.browser))}
+  <Modal title="This link needs a login" onclose={() => (authPrompt = null)} width="480px">
+    <p class="auth-hint">
+      Works only if you're already signed in to this site in the browser you pick. Azimut borrows
+      that session; it never asks for a password.
+    </p>
+
+    <div class="auth-source">
+      <label class="auth-label" for="cookie-browser">Use cookies from</label>
+      <select id="cookie-browser" class="input" bind:value={authPrompt.browser}>
+        {#each COOKIE_BROWSERS as b (b.id)}
+          <option value={b.id}>{b.label}</option>
+        {/each}
+      </select>
+      <button class="btn btn-primary" disabled={authPrompt.busy || chromiumBlocked} onclick={retryWithBrowser}>
+        <Icon name="download" size={14} /> Download signed in
+      </button>
+    </div>
+
+    {#if chromiumBlocked}
+      <p class="auth-note">
+        Windows locks Chrome-family cookies, so Azimut can't read them. Quit that browser and pick
+        Firefox, or use an exported cookies.txt below.
+      </p>
+    {/if}
+
+    <div class="auth-divider"><span>or</span></div>
+
+    <input
+      type="file"
+      accept=".txt"
+      hidden
+      bind:this={cookieFileInput}
+      onchange={(e) => retryWithCookieFile(e.currentTarget.files[0])}
+    />
+    <button
+      class="btn btn-ghost auth-file"
+      disabled={authPrompt.busy}
+      onclick={() => cookieFileInput.click()}
+    >
+      <Icon name="upload" size={14} /> Use a cookies.txt file
+    </button>
+
+    <div class="modal-actions">
+      <div style="flex:1"></div>
+      <button class="btn" disabled={authPrompt.busy} onclick={() => (authPrompt = null)}>Cancel</button>
+    </div>
+  </Modal>
+{/if}
+
 <!-- details modal: the same editor body as the case sidebar (provenance,
      derivation chain, title/notes/folder) so both stay in step -->
 {#if infoEntityId}
@@ -998,6 +1116,53 @@
     align-items: center;
     gap: 8px;
     margin-top: 14px;
+  }
+
+  /* cookie affordance */
+  .auth-hint {
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    margin: 0 0 14px;
+  }
+  .auth-source {
+    display: flex;
+    align-items: end;
+    gap: 8px;
+  }
+  .auth-source .input {
+    flex: 1;
+  }
+  .auth-label {
+    display: block;
+    font-size: var(--fs-sm);
+    color: var(--text-2);
+    margin-bottom: 4px;
+  }
+  .auth-note {
+    font-size: var(--fs-sm);
+    color: var(--warn, var(--text-2));
+    margin: 10px 0 0;
+  }
+  .auth-divider {
+    display: flex;
+    align-items: center;
+    text-align: center;
+    color: var(--text-2);
+    font-size: var(--fs-sm);
+    margin: 14px 0 10px;
+  }
+  .auth-divider::before,
+  .auth-divider::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
+  .auth-divider span {
+    padding: 0 10px;
+  }
+  .auth-file {
+    width: 100%;
+    justify-content: center;
   }
 
   /* multi-item picker */
