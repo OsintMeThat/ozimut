@@ -1,4 +1,4 @@
-# Azimut v0.2.2
+# Azimut v0.2.3
 
 ## OSINT toolkit at a glance
 
@@ -9,6 +9,7 @@
 
 ## What changed
 
+- **Bug fix (from v0.2.2).** The v0.2.2 binary reported itself as an older version, so its startup update check wrongly announced that v0.2.2 was available to anyone already running it. Fixed here, with a release-time guard so the version can't drift again. Upgrade to stop the false prompt.
 - **Gated downloads.** Downloads now get past a login wall. Public media is still fetched without any session; only when a post turns out to need an account does Media offer to borrow a signed-in browser's cookies or an exported `cookies.txt`. The session is used for that download, kept private in your workspace, and never leaves the machine. Chromium on Windows can't be read, so Azimut points you to the file route instead.
 - **Responsive Geo Proof toolbar.** The proof toolbar reflows to fit narrow screens instead of overflowing, and remembers the colour and stroke width you last drew with.
 

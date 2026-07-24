@@ -11,8 +11,34 @@ permissions:
   id-token: write   # PyPI Trusted Publishing (OIDC) — no token secret needed
 
 jobs:
+  guard:
+    name: Version + release gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev --no-install-project
+      # The pushed tag must equal the version baked into the code. When it
+      # didn't (0.2.2 shipped a stale __version__), the binary's self-update
+      # check nagged every user about the very release they were running. This
+      # is the check the release used to lack — it runs before anything builds.
+      - name: Tag matches the code version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver="$(uv run --no-sync python -c 'import azimut; print(azimut.__version__)')"
+          echo "tag=$tag  __version__=$ver"
+          [ "$tag" = "$ver" ] || { echo "::error::tag v$tag != __version__ $ver — bump src/azimut/__init__.py"; exit 1; }
+      # The version-parity gate the release workflow used to skip: pyproject's
+      # single-sourced version and the extension manifest must line up.
+      - name: Release gate + version parity
+        run: uv run --no-sync pytest tests/test_release_gate.py tests/test_updates.py -q
+
   dist:
     name: Build wheel + sdist
+    needs: guard
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +71,7 @@ jobs:
 
   binaries:
     name: Binary (${{ matrix.os }})
+    needs: guard
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "azimut"
-version = "0.2.2"
+# Single-sourced from src/azimut/__init__.py so a release is bumped in one place
+# (see [tool.hatch.version] below). Never add a literal version here.
+dynamic = ["version"]
 description = "A local OSINT workspace for media, geolocation proofs and case management."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -86,6 +88,11 @@ Homepage = "https://github.com/OsintMeThat/azimut"
 # the sdist and the wheel — `python -m build` builds the wheel from the sdist,
 # so if the sdist omits static the shipped wheel has no UI. Run `npm run build`
 # before building the package.
+# The version hatchling stamps into the wheel/sdist is read from __version__,
+# so pyproject never carries a second copy that can drift out of sync.
+[tool.hatch.version]
+path = "src/azimut/__init__.py"
+
 [tool.hatch.build]
 artifacts = ["src/azimut/static/**"]
 
