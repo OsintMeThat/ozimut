@@ -22,7 +22,7 @@ from pathlib import Path
 from bigcase import build_big_case
 from legacy_case import write_legacy_json_case
 
-from azimut import __version__, workspace
+from azimut import workspace
 from azimut.engine import links as link_engine
 from azimut.engine import media as media_engine
 from azimut.engine import thumbnails
@@ -192,7 +192,12 @@ def test_case_db_lives_under_the_workspace_root(tmp_workspace):
 
 def test_release_tooling_is_bounded_and_built_from_the_lock():
     cfg = _pyproject()
-    assert cfg["project"]["version"] == __version__
+    # Version is single-sourced from src/azimut/__init__.py through hatchling's
+    # dynamic version, so pyproject carries no literal copy to drift out of sync
+    # (the 0.2.2 release shipped a stale __version__ against a bumped pyproject).
+    assert "version" not in cfg["project"]
+    assert "version" in cfg["project"]["dynamic"]
+    assert cfg["tool"]["hatch"]["version"]["path"] == "src/azimut/__init__.py"
     assert cfg["build-system"]["requires"] == ["hatchling>=1.27,<2"]
     release = cfg["dependency-groups"]["release"]
     assert any(dep.startswith("build>=") and "<2" in dep for dep in release)
@@ -210,6 +215,12 @@ def test_release_tooling_is_bounded_and_built_from_the_lock():
     assert "--no-editable" in workflow
     assert "uv run python" not in workflow
     assert "body_path: docs/RELEASE_NOTES.md" in workflow
+    # A guard job runs before anything builds: it checks the pushed tag equals
+    # __version__ and runs the version-parity gate the release used to skip, so
+    # a stale version can never ship again (the 0.2.2 false-update-nag bug).
+    assert "tag=$tag  __version__=$ver" in workflow
+    assert "pytest tests/test_release_gate.py tests/test_updates.py" in workflow
+    assert "\n  dist:\n" in workflow and "needs: guard" in workflow
     release_job = workflow.split("  release:\n", maxsplit=1)[1]
     assert release_job.index("actions/checkout@v4") < release_job.index(
         "softprops/action-gh-release@v2"

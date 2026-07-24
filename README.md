@@ -11,6 +11,8 @@ to fix a point on the map.*
 
 ## v0.2.2: Login-walled downloads
 
+> v0.2.3 is a bug-fix release: it corrects the version the v0.2.2 binary reported, which made its startup update check falsely announce an update to everyone already on v0.2.2. No feature changes.
+
 | Tool | What it does |
 |------|--------------|
 | **Media** | Import local files or download by URL (X, Telegram, TikTok, YouTube, Instagram and more via yt-dlp, with a gallery-dl fallback for image-only posts). Public media is fetched cookie-less; a login-walled post prompts once for a browser session or an exported `cookies.txt`. Each item gets a clean local file, metadata and a SHA-256. Multi-photo posts open a picker. |
@@ -197,7 +199,7 @@ wheel + Windows/Linux/macOS binaries, attaches them to a GitHub release, and
 publishes to PyPI. **Don't publish by hand.**
 
 ```bash
-git tag v0.2.2 && git push origin v0.2.2
+git tag v0.2.3 && git push origin v0.2.3
 ```
 
 One-time setup: register the repo as a
