@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "azimut"
-version = "0.2.1"
+version = "0.2.2"
 description = "A local OSINT workspace for media, geolocation proofs and case management."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,6 +42,14 @@ dependencies = [
     # frozen into the binary (engine/scrapers.py).
     "yt-dlp>=2024.4.9",
     "gallery-dl>=1.27",
+    # Linux only: lets yt-dlp read a Chromium-family browser's cookies for gated
+    # downloads (engine/media.py) — the cookie values are sealed with the Secret
+    # Service keyring there, and this is the client that unseals them. macOS uses
+    # the `security` CLI (no dep) and Windows is routed to the cookies.txt
+    # fallback, so neither needs it. Pulls in cryptography + jeepney (Linux
+    # wheels, no compiler). Without it, Firefox and the cookies.txt fallback
+    # still work everywhere; only Chromium-on-Linux would go dark.
+    "secretstorage>=3.3,<4; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

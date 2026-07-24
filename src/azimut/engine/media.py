@@ -12,6 +12,7 @@ import json
 import mimetypes
 import re
 import shutil
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any, BinaryIO
 
 from PIL import Image
 
+from .. import config
 from ..workspace import Case, ensure_dir
 from . import ffmpeg as ffmpeg_engine
 from . import links as link_engine
@@ -33,6 +35,92 @@ SIDECAR_SUFFIX = ".azimut.json"
 # this; above it, treat the link as a real playlist and just grab its first
 # item, same as the old noplaylist behavior — no picker with hundreds of rows
 MAX_PICKER_ITEMS = 20
+
+# Chromium-family browsers whose cookie store is OS-encrypted and locked while
+# the browser runs. On Windows they're also app-bound-encrypted (Chrome 127+),
+# so yt-dlp can't read them even when closed — we route those to the cookies.txt
+# how-to instead of attempting the read.
+_CHROMIUM_BROWSERS = {"chrome", "chromium", "edge", "brave", "vivaldi", "opera", "whale"}
+
+# Substrings that mark a download failure as "you need to be logged in", as
+# opposed to a dead link or a network hiccup. Best-effort: a miss just means the
+# cookie prompt doesn't appear (no worse than before the feature existed).
+_AUTH_FAILURE_PHRASES = (
+    "log in",
+    "login",
+    "sign in",
+    "signin",
+    "private",
+    "authenticat",
+    "age-restrict",
+    "age restrict",
+    "confirm your age",
+    "members-only",
+    "members only",
+    "requires cookies",
+    "cookies-from-browser",
+    "http error 403",
+    "forbidden",
+    "nsfw",
+    "account",
+)
+
+
+def _looks_like_auth_failure(message: str) -> bool:
+    low = message.lower()
+    return any(phrase in low for phrase in _AUTH_FAILURE_PHRASES)
+
+
+def _is_gallery_auth_error(exc: BaseException) -> bool:
+    """gallery-dl raises typed ``AuthenticationError`` / ``AuthorizationError``
+    from ``gallery_dl.exception`` when a link needs a login."""
+    return type(exc).__name__ in {"AuthenticationError", "AuthorizationError"}
+
+
+def _resolve_cookie_file(file: str) -> Path:
+    """A stored cookies.txt is referenced by a workspace-relative path; an
+    externally supplied one may be absolute."""
+    path = Path(file)
+    return path if path.is_absolute() else config.workspace_root() / path
+
+
+def _cookie_ydl_opts(cookies: dict[str, Any] | None) -> dict[str, Any]:
+    """Translate a cookie source into yt-dlp options. Empty when no source —
+    the first attempt is always cookie-less (local-first)."""
+    if not cookies:
+        return {}
+    if cookies.get("browser"):
+        return {"cookiesfrombrowser": (cookies["browser"],)}
+    if cookies.get("file"):
+        return {"cookiefile": str(_resolve_cookie_file(cookies["file"]))}
+    return {}
+
+
+def cookies_from_preference(pref: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Map the stored ``download_cookies`` setting to a ``download_url`` cookie
+    argument. ``None`` for the off state (and any incomplete record), so a
+    half-configured source never gets half-applied."""
+    if not pref:
+        return None
+    source = pref.get("source")
+    if source == "browser" and pref.get("browser"):
+        return {"browser": pref["browser"]}
+    if source == "file" and pref.get("file"):
+        return {"file": pref["file"]}
+    return None
+
+
+def _apply_gallery_cookies(cookies: dict[str, Any] | None) -> None:
+    """Thread a cookie source into gallery-dl via its global config: a browser
+    as a ``[name]`` list, a file as a path string."""
+    if not cookies:
+        return
+    import gallery_dl.config as gdl_config
+
+    if cookies.get("browser"):
+        gdl_config.set(("extractor",), "cookies", [cookies["browser"]])
+    elif cookies.get("file"):
+        gdl_config.set(("extractor",), "cookies", str(_resolve_cookie_file(cookies["file"])))
 
 
 def _now() -> str:
@@ -328,7 +416,12 @@ def _register_gallery_dl_item(
 
 
 def _download_via_gallery_dl(
-    case: Case, url: str, *, index: int | None = None, title: str | None = None
+    case: Case,
+    url: str,
+    *,
+    index: int | None = None,
+    title: str | None = None,
+    cookies: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fallback for links yt-dlp can't extract at all.
 
@@ -339,6 +432,7 @@ def _download_via_gallery_dl(
     """
     import gallery_dl.extractor as gdl_extractor
 
+    _apply_gallery_cookies(cookies)
     extractor = gdl_extractor.find(url)
     if extractor is None:
         raise RuntimeError(f"no extractor (yt-dlp or gallery-dl) recognizes this link: {url}")
@@ -413,8 +507,38 @@ def _register_telegram_photo(
     )
 
 
+def _fallback_or_needs_auth(
+    case: Case,
+    url: str,
+    *,
+    index: int | None,
+    title: str | None,
+    cookies: dict[str, Any] | None,
+    yt_auth: bool,
+) -> dict[str, Any]:
+    """yt-dlp found nothing — try gallery-dl, but turn a login wall into a
+    ``needs_auth`` signal instead of an error, so the UI can offer cookies.
+
+    Only on a cookie-less attempt (``cookies is None``): a wall hit *with*
+    cookies already supplied is a real failure (bad/expired session), surfaced
+    as the underlying error rather than an endless re-prompt.
+    """
+    try:
+        return _download_via_gallery_dl(case, url, index=index, title=title, cookies=cookies)
+    except Exception as exc:
+        if cookies is None and (yt_auth or _is_gallery_auth_error(exc)):
+            return {"needs_auth": True, "platform": sys.platform}
+        raise
+
+
 def download_url(
-    case: Case, url: str, progress_hook=None, *, index: int | None = None, title: str | None = None
+    case: Case,
+    url: str,
+    progress_hook=None,
+    *,
+    index: int | None = None,
+    title: str | None = None,
+    cookies: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve and download a URL via yt-dlp. Blocking — run in a worker.
 
@@ -428,8 +552,18 @@ def download_url(
 
     Falls back to gallery-dl (see ``_download_via_gallery_dl``) for links
     yt-dlp can't extract at all — most commonly image-only posts.
+
+    ``cookies`` is a login session for gated media (``{"browser": name}`` or
+    ``{"file": path}``); ``None`` (the default) downloads cookie-less, so public
+    media never touches the session. A gated link tried cookie-less comes back
+    as ``{"needs_auth": True, ...}`` for the caller to retry with a source. A
+    Chromium pick on Windows can't be read (locked/app-bound store), so it
+    returns ``{"needs_auth": True, "guidance": "windows-chromium"}`` untried.
     """
     import yt_dlp
+
+    if cookies and cookies.get("browser") in _CHROMIUM_BROWSERS and sys.platform == "win32":
+        return {"needs_auth": True, "guidance": "windows-chromium"}
 
     media_dir = case.subdir("media")
     # a unique subdir per call — concurrent downloads (the multi-item picker
@@ -465,19 +599,24 @@ def download_url(
         ydl_opts["format"] = "best[acodec!=none][vcodec!=none]/best"
     if progress_hook:
         ydl_opts["progress_hooks"] = [progress_hook]
+    ydl_opts.update(_cookie_ydl_opts(cookies))
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        yt_auth = False
         try:
             info = ydl.extract_info(url, download=False)
             entries = [e for e in (info.get("entries") or []) if e]
-        except yt_dlp.utils.DownloadError:
+        except yt_dlp.utils.DownloadError as exc:
+            yt_auth = _looks_like_auth_failure(str(exc))
             info = None
             entries = []
 
         if narrowed:
             if info is None and not entries:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                return _download_via_gallery_dl(case, url, index=index, title=title)
+                return _fallback_or_needs_auth(
+                    case, url, index=index, title=title, cookies=cookies, yt_auth=yt_auth
+                )
             target_info = entries[0] if entries else info
         else:
             yt_count = len(entries) if entries else (1 if info is not None else 0)
@@ -485,7 +624,9 @@ def download_url(
 
             if total == 0:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
-                return _download_via_gallery_dl(case, url, index=index, title=title)
+                return _fallback_or_needs_auth(
+                    case, url, index=index, title=title, cookies=cookies, yt_auth=yt_auth
+                )
 
             if index is None and 1 < total <= MAX_PICKER_ITEMS:
                 # several attachments and the caller hasn't picked one yet —

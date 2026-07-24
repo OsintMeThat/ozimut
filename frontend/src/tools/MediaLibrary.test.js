@@ -57,3 +57,39 @@ describe('Media Library thumbnail states', () => {
     expect(source).toContain('/media/thumbnails/regenerate');
   });
 });
+
+describe('Media Library gated-download cookie affordance', () => {
+  it('keeps the first attempt cookie-less and only opts in on retry', () => {
+    // default download path never asks for cookies (local-first)
+    expect(source).toContain('async function startDownload(target, index = null, title = null, useCookies = false)');
+    expect(source).toContain('use_cookies: useCookies');
+  });
+
+  it('surfaces a login wall as the cookie prompt, not a plain error', () => {
+    expect(source).toContain("status.status === 'done' && status.result?.needs_auth");
+    expect(source).toContain('authPrompt = {');
+    expect(source).toContain('platform: status.result.platform');
+    expect(source).toContain('guidance: status.result.guidance');
+  });
+
+  it('states plainly that it borrows an existing login and never a password', () => {
+    expect(source).toContain("already signed in to this site");
+    expect(source).toContain('it never asks for a password');
+  });
+
+  it('retries with a saved browser source and re-downloads signed in', () => {
+    expect(source).toContain("download_cookies: { source: 'browser', browser: authPrompt.browser }");
+    expect(source).toContain('startDownload(url, index, title, true)');
+  });
+
+  it('offers the cookies.txt file fallback', () => {
+    expect(source).toContain("await api.post('/api/settings/cookies-file', form)");
+    expect(source).toContain('Use a cookies.txt file');
+  });
+
+  it('blocks the browser read for Chromium on Windows and steers to the file', () => {
+    expect(source).toContain("authPrompt.guidance === 'windows-chromium'");
+    expect(source).toContain("authPrompt.platform === 'win32' && CHROMIUM_BROWSERS.has(authPrompt.browser)");
+    expect(source).toContain('disabled={authPrompt.busy || chromiumBlocked}');
+  });
+});

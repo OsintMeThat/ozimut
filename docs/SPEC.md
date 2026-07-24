@@ -107,6 +107,7 @@ proof for publication.
 | ✅ **Case Notebook** | Edits tabbed Markdown notes with local media, entity links, broken-reference markers and PDF output. |
 | ✅ **Canvas tests** | Exercises Leaflet and Konva interactions in Chromium and Firefox. |
 | ✅ **Storage platform** | Uses per-case SQLite, bounded catalog queries and a durable one-worker job queue. |
+| ✅ **Gated downloads** | Fetches login-walled media by borrowing a browser session or cookies.txt, cookie-less by default and prompted only on a wall. |
 
 
 ---
@@ -146,7 +147,7 @@ app or extension captures; EXIF/GPS import suggestions for place and time.
 | **Timeline Builder** | Timestamped events from mixed sources aligned on timeline + map. |
 | **Report Builder** | Assemble proofs/maps/timeline/entities/notes into HTML/PDF. |
 
-Toward v4: dependency-aware delete (partly done); downloader cookies;
+Toward v4: dependency-aware delete (partly done);
 archive-on-download and a Wayback CDX snapshot timeline with diff; web-page save
 extension; case bundle import/export; editable places table with CSV/GeoJSON;
 imagery-date change detection; source location pattern-of-life map and timeline;

@@ -47,6 +47,22 @@ def test_load_settings_back_compat_missing_usage_key(monkeypatch, tmp_path):
     assert loaded["api_keys"] == {"google": "AIza.test"}
 
 
+def test_default_download_cookies_is_off():
+    assert config.DEFAULT_SETTINGS["download_cookies"] == {"source": "none"}
+
+
+def test_load_settings_back_compat_missing_download_cookies(monkeypatch, tmp_path):
+    """A settings.json predating gated downloads back-fills the default (off),
+    so behavior is unchanged until the user opts in."""
+    monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
+    config.settings_path().parent.mkdir(parents=True, exist_ok=True)
+    config.settings_path().write_text(
+        json.dumps({"tile_providers": [], "api_keys": {}}), encoding="utf-8"
+    )
+    loaded = config.load_settings()
+    assert loaded["download_cookies"] == {"source": "none"}
+
+
 def test_load_settings_missing_file_returns_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("AZIMUT_HOME", str(tmp_path))
     loaded = config.load_settings()

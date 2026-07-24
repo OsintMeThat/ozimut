@@ -829,6 +829,83 @@ def test_signature_rejects_oversized(client):
     assert client.get("/api/settings").json()["signature"] is False
 
 
+# ---- download cookies: the login session gated media needs -------------------
+
+
+def test_download_cookies_off_by_default(client):
+    body = client.get("/api/settings").json()
+    assert body["download_cookies"] == {"source": "none"}
+    assert body["cookies_file"] is False
+
+
+def test_put_download_cookies_browser(client):
+    saved = client.put(
+        "/api/settings/prefs",
+        json={"download_cookies": {"source": "browser", "browser": "firefox"}},
+    ).json()
+    assert saved["download_cookies"] == {"source": "browser", "browser": "firefox"}
+    assert client.get("/api/settings").json()["download_cookies"] == {
+        "source": "browser",
+        "browser": "firefox",
+    }
+
+
+def test_put_download_cookies_rejects_unknown_browser(client):
+    body = client.put(
+        "/api/settings/prefs",
+        json={"download_cookies": {"source": "browser", "browser": "netscape"}},
+    )
+    assert body.status_code == 422
+
+
+def test_cookies_file_upload_sets_file_source_and_is_private(client):
+    saved = client.post(
+        "/api/settings/cookies-file",
+        files={"file": ("cookies.txt", b"# Netscape HTTP Cookie File\n", "text/plain")},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["download_cookies"] == {"source": "file", "file": "cookies.txt"}
+
+    body = client.get("/api/settings").json()
+    assert body["cookies_file"] is True
+    assert body["download_cookies"]["source"] == "file"
+
+    path = config.cookies_file_path()
+    assert path.is_file()
+    import os
+    import sys
+
+    if sys.platform != "win32":  # POSIX perms only
+        assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+
+
+def test_cookies_file_delete_reverts_to_off(client):
+    client.post(
+        "/api/settings/cookies-file",
+        files={"file": ("cookies.txt", b"# cookies\n", "text/plain")},
+    )
+    assert client.delete("/api/settings/cookies-file").json()["download_cookies"] == {
+        "source": "none"
+    }
+    assert client.get("/api/settings").json()["cookies_file"] is False
+    assert not config.cookies_file_path().exists()
+
+
+def test_switching_to_browser_removes_stored_cookies_file(client):
+    """A login session on disk is a liability once it isn't the chosen source —
+    picking a browser (or turning cookies off) deletes the exported file."""
+    client.post(
+        "/api/settings/cookies-file",
+        files={"file": ("cookies.txt", b"# cookies\n", "text/plain")},
+    )
+    client.put(
+        "/api/settings/prefs",
+        json={"download_cookies": {"source": "browser", "browser": "firefox"}},
+    )
+    assert not config.cookies_file_path().exists()
+    assert client.get("/api/settings").json()["cookies_file"] is False
+
+
 def test_signature_never_lands_in_a_case(client):
     """It is workspace-level, like the API keys — a case folder never sees it."""
     client.post("/api/settings/signature", files={"file": ("logo.png", PNG, "image/png")})

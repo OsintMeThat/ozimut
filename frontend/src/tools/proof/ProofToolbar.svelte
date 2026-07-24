@@ -22,6 +22,91 @@
     panelCount,
     applyMagic,
   } = $props();
+
+  // Colour + size only matter while drawing or when a shape is selected. When
+  // the analyst is just panning with Select, they stay hidden so the column
+  // packs short enough to fit small screens without spilling controls off the
+  // bottom.
+  const showContextTools = $derived(tool !== 'select' || !!selectedShape);
+  const sizeValue = $derived(
+    selectedShape?.kind === 'text'
+      ? (selectedShape.fontSize ?? 28)
+      : (selectedShape?.strokeWidth ?? strokeW),
+  );
+
+  // Flyouts: one open at a time. Content stays in the DOM (hidden via CSS) so
+  // it renders on the server and can be tested; opening just reveals it.
+  let colorOpen = $state(false);
+  let sizeOpen = $state(false);
+  let overflowOpen = $state(false);
+  // Wrapper refs feed outside-click detection; button refs anchor the flyout.
+  let colorEl = $state();
+  let sizeEl = $state();
+  let overflowEl = $state();
+  let colorBtn = $state();
+  let sizeBtn = $state();
+  let overflowBtn = $state();
+  let colorPos = $state({});
+  let sizePos = $state({});
+  let overflowPos = $state({});
+
+  function toggle(which) {
+    colorOpen = which === 'color' ? !colorOpen : false;
+    sizeOpen = which === 'size' ? !sizeOpen : false;
+    overflowOpen = which === 'overflow' ? !overflowOpen : false;
+  }
+
+  // The colour/size buttons vanish when the analyst switches to Select with
+  // nothing selected; drop their flyouts so they never reappear stale.
+  $effect(() => {
+    if (!showContextTools) {
+      colorOpen = false;
+      sizeOpen = false;
+    }
+  });
+
+  // Flyouts are position:fixed so the toolbar can scroll (overflow-y) without
+  // clipping them. Anchor to the right of the trigger; grow upward when the
+  // trigger sits in the lower half of the viewport so the panel stays on-screen.
+  function anchor(btn) {
+    const r = btn.getBoundingClientRect();
+    const left = r.right + 6;
+    if (r.top > window.innerHeight / 2) {
+      return { left: `${left}px`, bottom: `${window.innerHeight - r.bottom}px` };
+    }
+    return { left: `${left}px`, top: `${r.top}px` };
+  }
+
+  $effect(() => {
+    if (colorOpen && colorBtn) colorPos = anchor(colorBtn);
+  });
+  $effect(() => {
+    if (sizeOpen && sizeBtn) sizePos = anchor(sizeBtn);
+  });
+  $effect(() => {
+    if (overflowOpen && overflowBtn) overflowPos = anchor(overflowBtn);
+  });
+
+  // Close on outside click (mousedown capture, like Satellite.svelte) or Escape.
+  $effect(() => {
+    if (!colorOpen && !sizeOpen && !overflowOpen) return;
+    const onDown = (e) => {
+      if (colorOpen && colorEl && !colorEl.contains(e.target)) colorOpen = false;
+      if (sizeOpen && sizeEl && !sizeEl.contains(e.target)) sizeOpen = false;
+      if (overflowOpen && overflowEl && !overflowEl.contains(e.target)) overflowOpen = false;
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        colorOpen = sizeOpen = overflowOpen = false;
+      }
+    };
+    document.addEventListener('mousedown', onDown, true);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown, true);
+      document.removeEventListener('keydown', onKey);
+    };
+  });
 </script>
 
 <div class="toolbar">
@@ -43,85 +128,155 @@
     </button>
   {/each}
   <div class="tb-sep"></div>
-  {#each palette as entry (entry)}
-    <button
-      class="color-btn"
-      class:active={activeColor === entry}
-      style:background={entry}
-      title="Same color = same feature"
-      onclick={() => setColor(entry)}
-      aria-label={`color ${entry}`}
-    ></button>
-  {/each}
-  <label
-    class="color-btn color-pick"
-    class:active={!palette.includes(activeColor)}
-    style:background={activeColor}
-    title="Custom color"
-  >
-    <Icon name="plus" size={12} />
-    <input
-      type="color"
-      value={activeColor}
-      oninput={(event) => setColor(event.target.value)}
-      aria-label="custom color"
-    />
-  </label>
-  <div class="tb-sep"></div>
-  <input
-    class="stroke-slider"
-    type="range"
-    min={selectedShape?.kind === 'text' ? 8 : 1}
-    max={selectedShape?.kind === 'text' ? 120 : 24}
-    step="1"
-    value={selectedShape?.kind === 'text'
-      ? (selectedShape.fontSize ?? 28)
-      : (selectedShape?.strokeWidth ?? strokeW)}
-    oninput={(event) => setStroke(+event.target.value)}
-    title={selectedShape?.kind === 'text'
-      ? 'Font size'
-      : selectedShape
-        ? 'Stroke width (selected)'
-        : 'Stroke width'}
-  />
-  <div class="tb-sep"></div>
   <button class="tb-btn" title="Fit view (f)" onclick={fit}>
     <Icon name="eye" size={18} />
   </button>
+
+  {#if showContextTools}
+    <div class="tb-sep"></div>
+
+    <!-- Colour: a swatch that opens the palette + custom picker. -->
+    <div class="tb-group" bind:this={colorEl}>
+      <button
+        class="tb-btn"
+        class:active={colorOpen}
+        title="Annotation colour"
+        onclick={() => toggle('color')}
+        bind:this={colorBtn}
+      >
+        <span class="tb-swatch" style:background={activeColor}></span>
+      </button>
+      <div
+        class="flyout flyout-colors"
+        class:open={colorOpen}
+        style:left={colorPos.left}
+        style:top={colorPos.top}
+        style:bottom={colorPos.bottom}
+      >
+        {#each palette as entry (entry)}
+          <button
+            class="color-btn"
+            class:active={activeColor === entry}
+            style:background={entry}
+            title="Same color = same feature"
+            onclick={() => { setColor(entry); colorOpen = false; }}
+            aria-label={`color ${entry}`}
+          ></button>
+        {/each}
+        <label
+          class="color-btn color-pick"
+          class:active={!palette.includes(activeColor)}
+          style:background={activeColor}
+          title="Custom color"
+        >
+          <Icon name="plus" size={12} />
+          <input
+            type="color"
+            value={activeColor}
+            oninput={(event) => setColor(event.target.value)}
+            aria-label="custom color"
+          />
+        </label>
+      </div>
+    </div>
+
+    <!-- Size: a horizontal slider for stroke width / font size. -->
+    <div class="tb-group" bind:this={sizeEl}>
+      <button
+        class="tb-btn tb-size"
+        class:active={sizeOpen}
+        title={selectedShape?.kind === 'text' ? 'Font size' : 'Stroke width'}
+        onclick={() => toggle('size')}
+        bind:this={sizeBtn}
+      >
+        <Icon name="sliders" size={18} />
+        <span class="tb-size-val">{sizeValue}</span>
+      </button>
+      <div
+        class="flyout flyout-size"
+        class:open={sizeOpen}
+        style:left={sizePos.left}
+        style:top={sizePos.top}
+        style:bottom={sizePos.bottom}
+      >
+        <input
+          class="stroke-slider"
+          type="range"
+          min={selectedShape?.kind === 'text' ? 8 : 1}
+          max={selectedShape?.kind === 'text' ? 120 : 24}
+          step="1"
+          value={selectedShape?.kind === 'text'
+            ? (selectedShape.fontSize ?? 28)
+            : (selectedShape?.strokeWidth ?? strokeW)}
+          oninput={(event) => setStroke(+event.target.value)}
+          title={selectedShape?.kind === 'text'
+            ? 'Font size'
+            : selectedShape
+              ? 'Stroke width (selected)'
+              : 'Stroke width'}
+        />
+      </div>
+    </div>
+  {/if}
+
   <div class="tb-sep"></div>
-  <button
-    class="tb-btn"
-    class:active={layout !== 'free'}
-    title="Grid layout: panels flow in rows"
-    onclick={() => setLayoutMode('grid')}
-  >
-    <Icon name="grid" size={18} />
-  </button>
-  <button
-    class="tb-btn"
-    class:active={layout === 'free'}
-    title="Free layout: drag panels anywhere"
-    onclick={() => setLayoutMode('free')}
-  >
-    <Icon name="layers" size={18} />
-  </button>
-  <div class="tb-sep"></div>
-  {#each Object.keys(tweetGuides) as entry (entry)}
+
+  <!-- Layout, tweet crops and repack live in one overflow flyout. -->
+  <div class="tb-group" bind:this={overflowEl}>
     <button
-      class="tb-btn tb-guide"
-      class:active={guide === entry}
-      title={`Preview the ${entry} tweet crop. Everything outside is cut off`}
-      onclick={() => (guide = guide === entry ? null : entry)}
-    >{entry}</button>
-  {/each}
-  <button
-    class="tb-btn tb-magic"
-    title={`Repack panels toward ${guide ?? '16:9'} and reset panel sizes`}
-    disabled={!panelCount}
-    onclick={applyMagic}
-  >
-    <Icon name="wand" size={18} />
-  </button>
+      class="tb-btn"
+      class:active={overflowOpen || layout === 'free' || !!guide}
+      title="Layout, tweet crops & repack"
+      onclick={() => toggle('overflow')}
+      bind:this={overflowBtn}
+    >
+      <Icon name="grid" size={18} />
+    </button>
+    <div
+      class="flyout flyout-overflow"
+      class:open={overflowOpen}
+      style:left={overflowPos.left}
+      style:top={overflowPos.top}
+      style:bottom={overflowPos.bottom}
+    >
+      <div class="flyout-row">
+        <button
+          class="tb-btn"
+          class:active={layout !== 'free'}
+          title="Grid layout: panels flow in rows"
+          onclick={() => setLayoutMode('grid')}
+        >
+          <Icon name="grid" size={18} />
+        </button>
+        <button
+          class="tb-btn"
+          class:active={layout === 'free'}
+          title="Free layout: drag panels anywhere"
+          onclick={() => setLayoutMode('free')}
+        >
+          <Icon name="layers" size={18} />
+        </button>
+      </div>
+      <div class="flyout-row">
+        {#each Object.keys(tweetGuides) as entry (entry)}
+          <button
+            class="tb-btn tb-guide"
+            class:active={guide === entry}
+            title={`Preview the ${entry} tweet crop. Everything outside is cut off`}
+            onclick={() => (guide = guide === entry ? null : entry)}
+          >{entry}</button>
+        {/each}
+        <button
+          class="tb-btn tb-magic"
+          title={`Repack panels toward ${guide ?? '16:9'} and reset panel sizes`}
+          disabled={!panelCount}
+          onclick={applyMagic}
+        >
+          <Icon name="wand" size={18} />
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <style>
@@ -135,6 +290,8 @@
     padding: 12px 0;
     border-right: 1px solid var(--border);
     background: var(--bg-1);
+    overflow-y: auto;
+    overflow-x: hidden;
   }
   .tb-btn {
     width: 38px;
@@ -144,6 +301,7 @@
     justify-content: center;
     border-radius: var(--r-sm);
     color: var(--text-3);
+    flex-shrink: 0;
   }
   .tb-btn:hover { color: var(--text-1); background: var(--bg-2); }
   .tb-btn.active { color: var(--text-1); background: var(--bg-3); }
@@ -156,7 +314,48 @@
     height: 1px;
     background: var(--border);
     margin: 4px 0;
+    flex-shrink: 0;
   }
+  .tb-size { position: relative; }
+  .tb-size-val {
+    position: absolute;
+    right: 2px;
+    bottom: 1px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--text-3);
+  }
+  .tb-swatch {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  }
+
+  .tb-group { display: contents; }
+
+  .flyout {
+    position: fixed;
+    z-index: 60;
+    display: none;
+    padding: 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg-1);
+    box-shadow: var(--shadow-2, 0 6px 24px rgba(0, 0, 0, 0.3));
+  }
+  .flyout.open { display: flex; }
+  .flyout-colors {
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 132px;
+    align-items: center;
+  }
+  .flyout-size { align-items: center; }
+  .flyout-overflow { flex-direction: column; gap: 6px; }
+  .flyout-row { display: flex; gap: 6px; }
+
   .color-btn {
     width: 22px;
     height: 22px;
@@ -186,9 +385,7 @@
     cursor: pointer;
   }
   .stroke-slider {
-    width: 80px;
-    transform: rotate(-90deg);
-    margin: 34px 0;
+    width: 140px;
     accent-color: var(--accent);
   }
   .tb-btn:disabled { opacity: 0.35; cursor: default; }
