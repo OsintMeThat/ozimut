@@ -19,7 +19,10 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.12"
-      - run: uv sync --frozen --extra dev --no-install-project
+      # Install the app (editable) + dev tools, like the CI backend job, so the
+      # gate can import azimut and run its tests. No frontend build: these tests
+      # don't touch the built UI, and the app tolerates a missing static dir.
+      - run: uv sync --frozen --extra dev
       # The pushed tag must equal the version baked into the code. When it
       # didn't (0.2.2 shipped a stale __version__), the binary's self-update
       # check nagged every user about the very release they were running. This
